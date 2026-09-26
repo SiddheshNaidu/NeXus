@@ -1,64 +1,158 @@
-import { Conversation, Message, AnswerStatus, Citation } from "./types";
+﻿/**
+ * NEXUS Search / Conversation Service
+ */
+
+import { api, getActiveWorkspaceId, streamRequest } from "./apiClient";
+import {
+  AnswerStatus,
+  ChunkSearchResponse,
+  Citation,
+  Conversation,
+  ConversationRead,
+  ConversationWithMessages,
+  EvidenceRead,
+  Message,
+  MessageRead,
+  SendMessageResponse,
+  SseDoneEvent,
+  SseEvidenceEvent,
+  SseTextEvent,
+} from "./types";
+
+function evidenceToCitations(evidence: EvidenceRead[]): Citation[] {
+  return evidence.map((ev) => ({
+    id: ev.id,
+    documentId: ev.document_id,
+    documentTitle:
+      (ev.metadata_json?.document_name as string | undefined) ??
+      `Document ${ev.document_id.slice(0, 8)}`,
+    page: ev.page_number != null ? String(ev.page_number) : undefined,
+    section: ev.section ?? undefined,
+    extractedText: ev.text,
+    relevanceScore: ev.relevance_score ?? undefined,
+  }));
+}
+
+function assistantMessageToUiMessage(
+  msg: MessageRead,
+  evidence: EvidenceRead[],
+): Message {
+  const citations = evidenceToCitations(evidence);
+
+  let status: AnswerStatus = "SUCCESS";
+  if (evidence.length === 0) {
+    status = "INSUFFICIENT_EVIDENCE";
+  }
+
+  return {
+    id: msg.id,
+    role: "nexus",
+    content: msg.content,
+    status,
+    citations: citations.length > 0 ? citations : undefined,
+  };
+}
 
 export const searchService = {
-  async createConversation(): Promise<Conversation> {
-    const id = "CONV-" + Math.random().toString(36).substring(2, 9).toUpperCase();
-    return { id, messages: [] };
-  },
-
-  async askQuestion(query: string): Promise<Message> {
-    // Simulate network delay
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    let status: AnswerStatus = "SUCCESS";
-    let content = "";
-    let citations: Citation[] = [];
-    let conflictingSources: { sourceA: string; sourceB: string; detail: string }[] = [];
-
-    const lowerQuery = query.toLowerCase();
-
-    if (lowerQuery.includes("conflict")) {
-      status = "CONFLICT";
-      content = "Sources provide conflicting information regarding this policy.";
-      conflictingSources = [
-        { sourceA: "Policy V1.pdf", sourceB: "Finance Addendum.pdf", detail: "V1 says ₹40,000, Addendum says ₹50,000." }
-      ];
-    } else if (lowerQuery.includes("insufficient") || lowerQuery.includes("unknown")) {
-      status = "INSUFFICIENT_EVIDENCE";
-      content = "NEXUS could not verify an answer from the available sources.";
-    } else if (lowerQuery.includes("none") || lowerQuery.includes("nothing")) {
-      status = "NO_RESULTS";
-      content = "No relevant evidence was found across the indexed workspace.";
-    } else if (lowerQuery.includes("error")) {
-      status = "ERROR";
-      content = "An internal engine error occurred while routing this query.";
-    } else if (lowerQuery.includes("restricted")) {
-      status = "ACCESS_RESTRICTED";
-      content = "You do not have permission to access the sources required to answer this query.";
-    } else {
-      status = "SUCCESS";
-      content = "The new reimbursement limit is ₹50,000 per designated business trip.";
-      citations = [
-        {
-          id: "cit-001",
-          documentId: "DOC-8992",
-          documentTitle: "Q3 Financial Report 2026.pdf",
-          page: "12",
-          section: "4.2 Travel",
-          extractedText: "Effective Q3 2026, the maximum allowable limit for international travel expenses, including flights and accommodation, has been revised to ₹50,000 per designated business trip."
-        }
-      ];
+  async createConversation(workspaceId?: string): Promise<Conversation> {
+    const wsId = workspaceId ?? getActiveWorkspaceId();
+    if (!wsId) {
+      throw new Error(
+        "No active workspace. Ensure identityService.resolveActiveWorkspace() has been called.",
+      );
     }
 
-    const nexMsg: Message = {
-      id: (Date.now() + 1).toString(),
-      role: "nexus",
-      content,
-      status,
-      citations,
-      conflictingSources
-    };
+    const conv = await api.post<ConversationRead>(
+      `/workspaces/${wsId}/conversations`,
+    );
 
-    return nexMsg;
-  }
+    return { id: conv.id, messages: [] };
+  },
+
+  async getConversation(conversationId: string): Promise<Conversation> {
+    const conv = await api.get<ConversationWithMessages>(
+      `/conversations/${conversationId}`,
+    );
+
+    const messages: Message[] = conv.messages.map((msg) => ({
+      id: msg.id,
+      role: msg.role === "user" ? "user" : "nexus",
+      content: msg.content,
+      status: msg.role === "assistant" ? "SUCCESS" : undefined,
+    }));
+
+    return { id: conv.id, messages };
+  },
+
+  async askQuestion(
+    conversationId: string,
+    query: string,
+  ): Promise<Message> {
+    const response = await api.post<SendMessageResponse>(
+      `/conversations/${conversationId}/messages`,
+      { content: query },
+    );
+
+    return assistantMessageToUiMessage(
+      response.assistant_message,
+      response.evidence,
+    );
+  },
+
+  async streamQuestion(
+    conversationId: string,
+    query: string,
+    handlers: {
+      onEvidence?: (ev: SseEvidenceEvent) => void;
+      onToken?: (ev: SseTextEvent) => void;
+      onDone?: (ev: SseDoneEvent) => void;
+    },
+  ): Promise<{ content: string; citations: Citation[] }> {
+    const gen = streamRequest(`/conversations/${conversationId}/messages/stream`, {
+      content: query,
+    });
+
+    let assembled = "";
+    let citations: Citation[] = [];
+
+    for await (const raw of gen) {
+      const event = raw as { type: string; [key: string]: unknown };
+
+      if (event.type === "evidence") {
+        const ev = event as unknown as SseEvidenceEvent;
+        citations = ev.chunks.map((c) => ({
+          id: c.chunk_id,
+          documentId: c.document_id,
+          documentTitle: c.document_name,
+          extractedText: c.text,
+          relevanceScore: c.score,
+        }));
+        handlers.onEvidence?.(ev);
+      } else if (event.type === "text") {
+        const ev = event as unknown as SseTextEvent;
+        assembled += ev.text;
+        handlers.onToken?.(ev);
+      } else if (event.type === "done") {
+        handlers.onDone?.(event as unknown as SseDoneEvent);
+        break;
+      }
+    }
+
+    return { content: assembled, citations };
+  },
+
+  async semanticSearch(
+    query: string,
+    limit = 10,
+    workspaceId?: string,
+  ): Promise<ChunkSearchResponse> {
+    const wsId = workspaceId ?? getActiveWorkspaceId();
+    if (!wsId) {
+      throw new Error("No active workspace.");
+    }
+
+    return api.get<ChunkSearchResponse>(
+      `/workspaces/${wsId}/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+    );
+  },
 };

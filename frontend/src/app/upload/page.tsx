@@ -1,32 +1,40 @@
-"use client";
+﻿"use client";
 
 import * as React from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Navbar } from "@/components/ui/navbar";
-import { FileText, ArrowRight, X } from "@phosphor-icons/react";
+import { FileText, ArrowRight, X, Warning } from "@phosphor-icons/react";
 import Link from "next/link";
-import { documentsService } from "@/services/documentsService";
+import { documentsService, saveSessionDocument, updateSessionDocument } from "@/services/documentsService";
 import { ProcessState, DocumentSource } from "@/services/types";
+import { useNexusSession } from "@/hooks/useNexusSession";
+import { ApiError, setDevUserId } from "@/services/apiClient";
 
 export default function UploadPage() {
+  const { workspace, isReady, error: sessionError } = useNexusSession();
   const [doc, setDoc] = React.useState<DocumentSource | null>(null);
   const [isPolling, setIsPolling] = React.useState(false);
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isPolling && doc?.id) {
       interval = setInterval(async () => {
         try {
-          const updatedDoc = await documentsService.getDocumentStatus(doc.id);
+          const updatedDoc = await documentsService.getDocumentStatus(doc.id, doc);
           setDoc(updatedDoc);
+          updateSessionDocument(updatedDoc);
           if (updatedDoc.status === "READY" || updatedDoc.status === "FAILED") {
             setIsPolling(false);
           }
         } catch (e) {
           console.error("Failed to poll status", e);
+          if (e instanceof ApiError && e.status === 401) {
+            setUploadError("Authentication required. Please set your user ID.");
+          }
           setIsPolling(false);
         }
-      }, 500);
+      }, 1500);
     }
     return () => clearInterval(interval);
   }, [isPolling, doc?.id]);
@@ -39,9 +47,30 @@ export default function UploadPage() {
   };
 
   const startUpload = async (file: File) => {
-    const newDoc = await documentsService.uploadDocument(file);
-    setDoc(newDoc);
-    setIsPolling(true);
+    setUploadError(null);
+    if (!workspace) {
+      setUploadError("No workspace available. Ensure you are authenticated.");
+      return;
+    }
+
+    try {
+      const newDoc = await documentsService.uploadDocument(file, workspace.id);
+      setDoc(newDoc);
+      saveSessionDocument(newDoc);
+      setIsPolling(true);
+    } catch (e) {
+      if (e instanceof ApiError) {
+        if (e.status === 401) {
+          setUploadError("Authentication required. Please configure your user ID.");
+        } else if (e.status === 403) {
+          setUploadError("You do not have permission to upload to this workspace.");
+        } else {
+          setUploadError(`Upload failed: ${e.message}`);
+        }
+      } else {
+        setUploadError("Upload failed. Is the backend running?");
+      }
+    }
   };
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); };
@@ -55,7 +84,9 @@ export default function UploadPage() {
         <div className="mb-8 md:mb-12 border-b border-white/10 pb-6 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
           <div>
             <h1 className="text-2xl md:text-3xl font-medium tracking-tight text-zinc-50">Knowledge Ingestion</h1>
-            <p className="mt-2 text-xs md:text-sm text-zinc-500 font-mono uppercase tracking-[0.1em]">Target: Core Index</p>
+            <p className="mt-2 text-xs md:text-sm text-zinc-500 font-mono uppercase tracking-[0.1em]">
+              {workspace ? `Workspace: ${workspace.name}` : "Target: Core Index"}
+            </p>
           </div>
           {doc?.status === "READY" && (
             <Link 
@@ -69,6 +100,30 @@ export default function UploadPage() {
             </Link>
           )}
         </div>
+
+        {(sessionError || uploadError) && (
+          <div className="mb-6 flex items-start gap-3 border border-red-500/20 bg-red-500/5 px-4 py-3">
+            <Warning size={16} className="text-red-400 mt-0.5 shrink-0" />
+            <p className="text-xs text-red-300 font-mono">{sessionError ?? uploadError}</p>
+          </div>
+        )}
+
+        {workspace && (
+          <div className="mb-6 flex items-center gap-2">
+            <span className={`text-[9px] font-mono uppercase tracking-widest px-2 py-0.5 border ${
+              workspace.role === "admin" || workspace.role === "contributor"
+                ? "border-indigo-500/30 text-indigo-400"
+                : "border-zinc-700 text-zinc-500"
+            }`}>
+              {workspace.role}
+            </span>
+            {workspace.role === "viewer" && (
+              <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">
+                — viewer role cannot upload documents
+              </span>
+            )}
+          </div>
+        )}
 
         <AnimatePresence mode="wait">
           {!doc && (
@@ -100,9 +155,18 @@ export default function UploadPage() {
                 <FileText size={32} className="text-zinc-600 group-hover:text-zinc-300 transition-colors mb-6" weight="light" />
                 <span className="text-sm font-mono text-zinc-400 uppercase tracking-widest">Select Source Data</span>
                 <span className="text-[10px] font-mono text-zinc-600 mt-4 uppercase tracking-[0.2em]">PDF, TXT, DOCX</span>
+                {!isReady && (
+                  <span className="text-[10px] font-mono text-zinc-700 mt-3 uppercase tracking-[0.2em] animate-pulse">Connecting to engine...</span>
+                )}
               </div>
               
-              <input type="file" className="hidden" id="file-upload" onChange={(e) => {
+              <input
+                type="file"
+                className="hidden"
+                id="file-upload"
+                accept=".pdf,.txt,.docx,.doc"
+                disabled={!isReady || workspace?.role === "viewer"}
+                onChange={(e) => {
                   if (e.target.files && e.target.files[0]) {
                     startUpload(e.target.files[0]);
                   }
@@ -120,16 +184,42 @@ export default function UploadPage() {
             >
               <div className="flex items-start justify-between mb-10 md:mb-16 border-b border-white/5 pb-6 md:pb-8">
                 <div className="min-w-0 flex-1 pr-4">
-                  <div className="text-[10px] font-mono text-indigo-400 uppercase tracking-widest mb-2">Source: {doc.id}</div>
+                  <div className="text-[10px] font-mono text-indigo-400 uppercase tracking-widest mb-2">
+                    Source: {doc.id.slice(0, 13)}…
+                  </div>
                   <h3 className="text-lg md:text-xl font-medium text-zinc-50 truncate">{doc.filename}</h3>
                   <p className="text-xs font-mono text-zinc-500 mt-2">{(doc.sizeBytes / 1024 / 1024).toFixed(2)} MB</p>
+                  {doc.processingProgress != null && doc.status !== "READY" && doc.status !== "FAILED" && (
+                    <div className="mt-3 flex items-center gap-3">
+                      <div className="flex-1 h-0.5 bg-white/5">
+                        <div
+                          className="h-full bg-indigo-500 transition-all duration-700"
+                          style={{ width: `${doc.processingProgress}%` }}
+                        />
+                      </div>
+                      <span className="text-[10px] font-mono text-zinc-500">{doc.processingProgress}%</span>
+                    </div>
+                  )}
                 </div>
                 {(doc.status === "READY" || doc.status === "FAILED") && (
-                  <button onClick={() => {setDoc(null); setIsPolling(false);}} className="p-2 text-zinc-500 hover:text-zinc-300 transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0A0A]">
+                  <button
+                    onClick={() => { setDoc(null); setIsPolling(false); setUploadError(null); }}
+                    className="p-2 text-zinc-500 hover:text-zinc-300 transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0A0A]"
+                  >
                     <X size={20} />
                   </button>
                 )}
               </div>
+
+              {doc.status === "FAILED" && (
+                <div className="mb-8 flex items-start gap-3 border border-red-500/20 bg-red-500/5 px-4 py-3">
+                  <Warning size={16} className="text-red-400 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="text-xs font-mono text-red-400 uppercase tracking-widest mb-1">Processing Failed</p>
+                    <p className="text-xs text-zinc-400">Unable to process this document. Try a different format or re-upload.</p>
+                  </div>
+                </div>
+              )}
 
               <div className="space-y-1">
                 <ProcessRow label="INITIALIZE" fullLabel="INITIALIZING INGESTION" status={doc.status === "QUEUED" ? "ACTIVE" : doc.status !== "FAILED" ? "DONE" : "PENDING"} />

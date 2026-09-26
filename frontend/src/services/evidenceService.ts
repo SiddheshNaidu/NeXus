@@ -1,17 +1,37 @@
-import { EvidenceContext } from "./types";
+﻿/**
+ * NEXUS Evidence Service
+ */
+
+import { api } from "./apiClient";
+import { DocumentRead, EvidenceContext } from "./types";
 
 export const evidenceService = {
-  async getEvidenceContext(documentId: string, citationId?: string): Promise<EvidenceContext> {
-    await new Promise(resolve => setTimeout(resolve, 800));
-    
+  async getEvidenceContext(
+    documentId: string,
+    citationId?: string,
+    extractedText?: string,
+    pageNumber?: string,
+    section?: string,
+  ): Promise<EvidenceContext> {
+    const doc = await api.get<DocumentRead>(`/documents/${documentId}`);
+
     return {
-      documentId,
-      documentTitle: "Q3 Financial Report 2026.pdf",
-      citationId: citationId || "cit-001",
-      page: "12",
-      section: "4.2 Travel",
-      extractedText: "Effective Q3 2026, the maximum allowable limit for international travel expenses, including flights and accommodation, has been revised to ₹50,000 per designated business trip.",
-      surroundingContext: "[Document body requires backend PDF extraction to display.]"
+      documentId: doc.id,
+      documentTitle: doc.name,
+      citationId: citationId ?? `chunk-${documentId.slice(0, 8)}`,
+      page: pageNumber,
+      section: section ?? undefined,
+      extractedText:
+        extractedText ??
+        "Evidence text not available — open the source document to view this passage.",
+      surroundingContext:
+        doc.storage_key
+          ? `[Full document available in backend storage — page ${pageNumber ?? "?"} of ${doc.page_count ?? "?"}]`
+          : "[Document body requires the backend document preview endpoint to display the full page context.]",
     };
-  }
+  },
+
+  async getDocumentMeta(documentId: string): Promise<DocumentRead> {
+    return api.get<DocumentRead>(`/documents/${documentId}`);
+  },
 };
