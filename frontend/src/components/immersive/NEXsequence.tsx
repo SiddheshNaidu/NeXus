@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import React, { useRef, useEffect, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
@@ -114,7 +114,7 @@ function Scene3D() {
   );
 }
 
-export function LisaHeroSequence() {
+export function NEXsequence() {
   const [step, setStep] = useState(0);
   const [hasSpokenFirst, setHasSpokenFirst] = useState(false);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);

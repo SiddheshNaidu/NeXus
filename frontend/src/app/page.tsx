@@ -11,7 +11,7 @@ import { DocumentSource } from "@/services/types";
 import { StorySection } from "@/components/ui/story-section";
 import { NexusContactParticles } from "@/components/ui/nexus-contact-particles";
 import { AetherFlowBackground } from "@/components/ui/aether-flow-hero";
-import { LisaHeroSequence } from "@/components/immersive/LisaHeroSequence";
+import { NEXsequence } from "@/components/immersive/NEXsequence";
 
 export default function Home() {
   const router = useRouter();
@@ -27,7 +27,7 @@ export default function Home() {
       <Navbar />
 
       {/* Hero: Locomotive-Style Lisa 3D Sequence */}
-      <LisaHeroSequence />
+      <NEXsequence />
 
       {/* Search section */}
       <div className="relative">
