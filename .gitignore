@@ -1,0 +1,27 @@
+# Ignore Agent/AI Tooling Folders
+.agents/
+.gemini/
+
+# Leftover Scratch Scripts
+updateFiles.js
+update.js
+updateDocs.js
+*.scratch.*
+
+# General
+node_modules/
+.DS_Store
+Thumbs.db
+
+# Frontend specific ignores are already handled in frontend/.gitignore,
+# but adding top level failsafes just in case
+.env
+.env.*
+.next/
+out/
+build/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

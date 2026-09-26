@@ -1,0 +1,141 @@
+"use client";
+
+import * as React from "react";
+import { Navbar } from "@/components/ui/navbar";
+import { ArrowLeft, Textbox, MagnifyingGlassPlus, MagnifyingGlassMinus, FileText } from "@phosphor-icons/react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { evidenceService } from "@/services/evidenceService";
+import { EvidenceContext } from "@/services/types";
+
+function EvidenceContent({ documentId }: { documentId: string }) {
+  const searchParams = useSearchParams();
+  const citationId = searchParams.get("citation") || undefined;
+  
+  const [ctx, setCtx] = React.useState<EvidenceContext | null>(null);
+
+  React.useEffect(() => {
+    evidenceService.getEvidenceContext(documentId, citationId).then(setCtx);
+  }, [documentId, citationId]);
+
+  return (
+    <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 w-full h-full border-t border-white/5">
+      {/* LEFT COLUMN: Evidence Context */}
+      <div className="hidden lg:flex flex-col col-span-3 h-full border-r border-white/5 bg-[#050505]">
+        <div className="p-5 border-b border-white/5 flex items-center justify-between">
+          <Link href="/search" className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-zinc-500 hover:text-zinc-300 transition-colors">
+            <ArrowLeft size={14} />
+            Return to Answer
+          </Link>
+        </div>
+        
+        <div className="flex-1 overflow-y-auto p-6 space-y-10">
+          {!ctx ? (
+            <div className="animate-pulse space-y-6">
+              <div className="h-2 bg-white/10 w-24 mb-4" />
+              <div className="h-4 bg-white/10 w-full" />
+              <div className="h-2 bg-white/10 w-16" />
+            </div>
+          ) : (
+            <>
+              <div>
+                <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-4 block">Source Document</span>
+                <div className="flex items-start gap-3">
+                  <FileText size={20} className="text-zinc-600 shrink-0 mt-0.5" />
+                  <div>
+                    <h3 className="text-sm font-medium text-zinc-300 leading-tight">{ctx.documentTitle}</h3>
+                    <div className="flex gap-2 text-[10px] font-mono text-zinc-500 uppercase tracking-widest mt-2">
+                      <span>Pg {ctx.page}</span>
+                      {ctx.citationId && <span>â€¢ {ctx.citationId}</span>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <span className="text-[10px] font-mono text-indigo-400 uppercase tracking-[0.2em] mb-4 block">Extracted Evidence Match</span>
+                <div className="relative border-l-2 border-indigo-500 pl-4 py-1">
+                  <p className="text-sm text-zinc-400 leading-relaxed font-serif italic">
+                    "{ctx.extractedText}"
+                  </p>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* CENTER COLUMN: Document Viewer */}
+      <div className="col-span-1 lg:col-span-9 flex flex-col h-full bg-[#0A0A0A] relative">
+                {/* MOBILE BACK LINK */}
+        <div className="lg:hidden p-4 border-b border-white/5 bg-[#050505] flex items-center">
+          <Link href="/search" className="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-zinc-400 hover:text-zinc-200 transition-colors">
+            <ArrowLeft size={16} />
+            Return to Answer
+          </Link>
+        </div>
+
+        <div className="flex items-center justify-between p-3 px-5 border-b border-white/5 bg-[#050505]">
+          <div className="flex items-center gap-3">
+            <Textbox size={16} className="text-zinc-500" />
+            <span className="text-[10px] font-mono uppercase tracking-[0.2em] text-zinc-400">Document Preview</span>
+          </div>
+          <div className="flex items-center gap-1 bg-[#0A0A0A] border border-white/5 rounded">
+            <button disabled className="p-1.5 opacity-50 text-zinc-500">
+              <MagnifyingGlassMinus size={14} />
+            </button>
+            <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 w-12 text-center">100%</span>
+            <button disabled className="p-1.5 opacity-50 text-zinc-500">
+              <MagnifyingGlassPlus size={14} />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto p-6 md:p-12 flex justify-center items-start">
+          <div className="w-full max-w-[850px] min-h-[1100px] bg-[#111113] border border-white/5 shadow-2xl p-12 md:p-20">
+            {!ctx ? (
+              <div className="animate-pulse space-y-8">
+                 <div className="h-6 bg-white/5 w-1/3 mb-8" />
+                 <div className="h-4 bg-white/5 w-full" />
+                 <div className="h-4 bg-white/5 w-5/6" />
+                 <div className="h-4 bg-white/5 w-full" />
+              </div>
+            ) : (
+              <div className="my-16">
+                <h4 className="text-xl font-serif text-zinc-300 mb-6">{ctx.section}</h4>
+
+                <p className="text-sm text-zinc-400 font-serif leading-loose text-justify">
+                  <span className="bg-indigo-500/10 text-zinc-300 px-1 py-0.5 outline outline-1 outline-indigo-500/30 relative">
+                    {ctx.extractedText}
+                    <span className="absolute -left-3 top-0 bottom-0 w-1 bg-indigo-500" />
+                  </span>
+                </p>
+                
+                <div className="border border-dashed border-white/10 p-6 mt-6">
+                  <p className="text-sm font-mono text-zinc-500 text-center uppercase tracking-widest">
+                    {ctx.surroundingContext}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function EvidenceViewer({ params }: { params: Promise<{ documentId: string }> }) {
+  const resolvedParams = React.use(params);
+  
+  return (
+    <main className="min-h-[100dvh] w-full bg-[#050505] flex flex-col text-zinc-50 overflow-hidden">
+      <Navbar />
+      <div className="flex-1 mt-16 flex flex-col">
+        <React.Suspense fallback={<div className="flex-1 bg-[#0A0A0A] border-t border-white/5 p-12">Loading...</div>}>
+          <EvidenceContent documentId={resolvedParams.documentId} />
+        </React.Suspense>
+      </div>
+    </main>
+  );
+}
