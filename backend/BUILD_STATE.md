@@ -154,3 +154,35 @@ The root cause of the test isolation failures was `conftest.py` defining a `clie
 - `GeminiEmbeddingProvider` uses `run_in_executor` to keep the async event loop unblocked while the synchronous `google-genai` SDK call runs in a thread.
 - The search SQL uses a raw `<=>` cosine distance operator with a workspace-scoped `JOIN documents` to enforce tenant isolation at the query level.
 - `MockEmbeddingProvider` returns deterministic unit vectors keyed by `hash(text[:64]) % 1536` — no two identical texts get the same vector slot, making results predictable without any external I/O.
+
+---
+
+## Sprint 4 — Chat, RAG, and Conversations ✅ COMPLETE
+
+### What was built
+
+| Module | Path | Description |
+|--------|------|-------------|
+| LLM provider | `app/providers/llm.py` | `GeminiLLMProvider` — calls `gemini-2.0-flash-lite` via `google-genai` SDK, fully async via `run_in_executor`; handles `system` role → `system_instruction`; implements both `complete()` and `complete_structured()` |
+| Chat service | `app/services/chat.py` | Full RAG orchestration: embed query → cosine search → build context prompt → call LLM → persist user/assistant `Message` rows + `Evidence` rows |
+| Conversations endpoint | `app/api/v1/conversations.py` | `POST /workspaces/{id}/conversations` (create), `GET /conversations/{id}` (history), `POST /conversations/{id}/messages` (send + AI reply). `get_embedder()` and `get_llm()` FastAPI deps (both overridable in tests) |
+| Router registration | `app/api/v1/__init__.py` | Conversations router added |
+| Sprint 4 fixtures | `tests/conftest_sprint4.py` | `MockEmbeddingProvider` + `MockLLMProvider` (no real API calls), two isolated workspaces, all 5 FastAPI dependency overrides |
+| Sprint 4 tests | `tests/test_sprint4.py` | 21 tests covering all acceptance criteria |
+
+### Acceptance criteria
+
+| Criterion | Result |
+|-----------|--------|
+| User can create a conversation and send a message | ✅ `TestCreateConversation` + `TestSendMessage` |
+| Sending a message triggers mock embedder, mock LLM, saves User Message, Assistant Message, Evidence | ✅ `test_mock_embedder_was_called`, `test_mock_llm_was_called`, `test_user_message_saved_to_db`, `test_assistant_message_saved_to_db`, `test_evidence_saved_to_db` |
+| 403 Forbidden for cross-workspace access | ✅ `TestCrossTenantIsolation` — 5 isolation tests |
+| No real API calls during tests | ✅ `MockLLMProvider` (canned reply) + `MockEmbeddingProvider` (unit vectors) — both wired via dep overrides |
+| All 71 tests pass (Sprint 0 + 1 + 2 + 3 + 4) | ✅ 71 passed, 0 failed |
+
+### Key engineering notes
+
+- `get_embedder()` and `get_llm()` in `conversations.py` are dedicated dependency functions — distinct from the same-named deps in `documents.py` and `workspaces.py` — so they can be independently overridden per-test.
+- The ownership check (`conv.user_id != current_user.id`) enforces that even a viewer in the same workspace cannot read or post to another user's conversation.
+- `handle_message()` in `chat.py` is a pure service function with no FastAPI coupling — all providers are passed as arguments.
+- Evidence rows link `chunk_id` + `document_id` + `relevance_score` so the frontend can render exact citations.
