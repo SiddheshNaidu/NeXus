@@ -371,3 +371,27 @@ class TestCrossTenantIsolation:
             headers={"X-Dev-User-ID": str(seed4.user_v.id)},
         )
         assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_rag_pipeline_never_retrieves_cross_tenant_chunks(
+        self, client: AsyncClient, seed4
+    ):
+        """User A's conversation in Workspace A must never retrieve User B's documents as evidence."""
+        # 1. Upload doc to workspace B as user B
+        doc_b_resp = await _upload_doc(client, seed4.workspace_b.id, seed4.user_b.id)
+        doc_b_id = doc_b_resp["document"]["id"]
+
+        # 2. Upload doc to workspace A as user A
+        await _upload_doc(client, seed4.workspace_a.id, seed4.user_a.id)
+
+        # 3. User A creates a conversation in workspace A
+        conv_a = await _create_conversation(client, seed4.workspace_a.id, seed4.user_a.id)
+
+        # 4. User A sends a message
+        resp = await _send_message(client, uuid.UUID(conv_a["id"]), seed4.user_a.id)
+        assert resp.status_code == 201
+        data = resp.json()
+
+        # 5. Verify NO evidence comes from Workspace B's document
+        evidence_doc_ids = [e["document_id"] for e in data.get("evidence", [])]
+        assert doc_b_id not in evidence_doc_ids, "CRITICAL LEAK: Workspace B document retrieved as evidence in Workspace A!"
