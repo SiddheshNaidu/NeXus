@@ -121,4 +121,36 @@ The root cause of the test isolation failures was `conftest.py` defining a `clie
 
 ---
 
-## Sprint 3 — AI / Embeddings / Vector Search — PENDING
+## Sprint 3 — AI / Embeddings / Vector Search ✅ COMPLETE
+
+### What was built
+
+| Module | Path | Description |
+|--------|------|-------------|
+| Alembic migration | `app/db/migrations/versions/a1b2c3d4e5f6_add_embedding_column.py` | Adds `VECTOR(1536)` embedding column + IVFFlat cosine index to `document_chunks`; enables `pgvector` extension |
+| ORM update | `app/db/models/documents.py` | Added `embedding: Mapped[list[float] | None]` field using `pgvector.sqlalchemy.Vector(1536)` |
+| Embedding provider | `app/providers/embeddings.py` | `GeminiEmbeddingProvider` — calls `gemini-embedding-2` via `google-genai` SDK, fully async via `run_in_executor`; `RETRIEVAL_DOCUMENT` task type for indexing, `RETRIEVAL_QUERY` for search; batched, singleton |
+| Document service (upgraded) | `app/services/documents.py` | Replaced mock worker with real pipeline: extract text → `_split_chunks` (512 char / 64 overlap) → batch embed → save `DocumentChunk` rows with embeddings |
+| Documents endpoint (upgraded) | `app/api/v1/documents.py` | Added `get_embedder()` FastAPI dep (overridable in tests); wired into `upload_document` |
+| Search endpoint | `app/api/v1/workspaces.py` | `GET /workspaces/{id}/search?q=` — cosine similarity via `<=>` operator, workspace-scoped JOIN, Viewer+ only |
+| Search schemas | `app/schemas/search.py` | Added `ChunkSearchResult`, `ChunkSearchResponse` |
+| Sprint 3 fixtures | `tests/conftest_sprint3.py` | `MockEmbeddingProvider` (no real API calls), two isolated workspaces, dual `get_embedder` override |
+| Sprint 3 tests | `tests/test_sprint3.py` | 15 tests covering all acceptance criteria |
+| `requirements.txt` | — | Added `google-genai>=1.0.0` |
+
+### Acceptance criteria
+
+| Criterion | Result |
+|-----------|--------|
+| pgvector column created, accepts 1536-d vectors | ✅ `TestPgvectorColumn` — 3 tests: column exists, insert/read roundtrip, dimension verified via pg catalog |
+| Search query returns relevant chunks | ✅ `TestVectorSearch` — 5 tests: results returned, correct fields, viewer can search, empty workspace, workspace-scoped |
+| Cross-tenant isolation: User A cannot see User B's chunks | ✅ `TestCrossTenantIsolation` — 4 tests: 403 on foreign workspace, B search yields no A docs, contributor isolation, viewer upload blocked |
+| All 50 tests pass (Sprint 0 + 1 + 2 + 3) | ✅ 50 passed, 0 failed |
+| BLOCKER-001 resolved | ✅ pgvector container at port 5434 has `vector` extension; migration applied |
+
+### Key engineering notes
+
+- The `get_embedder()` FastAPI dependency mirrors the `get_storage()` pattern from Sprint 2 — fully overridable in tests without touching the real provider singleton.
+- `GeminiEmbeddingProvider` uses `run_in_executor` to keep the async event loop unblocked while the synchronous `google-genai` SDK call runs in a thread.
+- The search SQL uses a raw `<=>` cosine distance operator with a workspace-scoped `JOIN documents` to enforce tenant isolation at the query level.
+- `MockEmbeddingProvider` returns deterministic unit vectors keyed by `hash(text[:64]) % 1536` — no two identical texts get the same vector slot, making results predictable without any external I/O.

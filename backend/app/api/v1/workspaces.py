@@ -1,19 +1,25 @@
-"""Workspace endpoints — Sprint 1.
+"""Workspace endpoints — Sprint 1 / Sprint 3.
 
-GET /workspaces              — list all workspaces the caller belongs to.
-GET /workspaces/{id}         — get a single workspace (caller must be a member).
-GET /workspaces/{id}/collections — list collections in a workspace (viewer+).
+GET /workspaces                              — list all workspaces the caller belongs to.
+GET /workspaces/{id}                         — get a single workspace (caller must be a member).
+GET /workspaces/{id}/collections             — list collections in a workspace (viewer+).
+GET /workspaces/{id}/search?q={query}        — vector similarity search (viewer+).
 """
 import uuid
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import NotFoundError
 from app.core.security import get_current_user
+from app.db.models.documents import Document, DocumentChunk
 from app.db.models.users import User
 from app.db.models.workspaces import Collection
 from app.db.session import get_db
+from app.providers import EmbeddingProvider
+from app.providers.embeddings import embed_query, get_embedding_provider as _get_provider
+from app.schemas.search import ChunkSearchResult, ChunkSearchResponse
 from app.schemas.workspaces import CollectionRead, WorkspaceWithRole
 from app.services.permissions import (
     Role,
@@ -23,6 +29,11 @@ from app.services.permissions import (
 )
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+
+
+def get_embedder() -> EmbeddingProvider:
+    """FastAPI dependency — embedding provider (overridable in tests)."""
+    return _get_provider()
 
 
 @router.get(
@@ -87,3 +98,67 @@ async def list_collections(
     )
     collections = result.scalars().all()
     return [CollectionRead.model_validate(c) for c in collections]
+
+
+@router.get(
+    "/{workspace_id}/search",
+    response_model=ChunkSearchResponse,
+    summary="Semantic search",
+    description=(
+        "Performs cosine similarity search over embedded document chunks "
+        "in this workspace. Requires Viewer role."
+    ),
+)
+async def search_workspace(
+    workspace_id: uuid.UUID,
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(10, ge=1, le=100, description="Max chunks to return"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    embedder: EmbeddingProvider = Depends(get_embedder),
+) -> ChunkSearchResponse:
+    # Permission: viewer minimum
+    await require_workspace_role(db, current_user, workspace_id, Role.VIEWER)
+
+    # Embed the query using RETRIEVAL_QUERY task type
+    from app.providers.embeddings import embed_query as _embed_query
+    query_vector = await _embed_query(q)
+
+    # Cosine similarity search — scoped to this workspace only (cross-tenant isolation)
+    # We join document_chunks → documents to filter by workspace_id
+    sql = text("""
+        SELECT
+            dc.id            AS chunk_id,
+            dc.document_id,
+            dc.chunk_index,
+            dc.raw_text,
+            d.name           AS document_name,
+            1 - (dc.embedding <=> CAST(:vec AS vector)) AS score
+        FROM document_chunks dc
+        JOIN documents d ON d.id = dc.document_id
+        WHERE d.workspace_id = :workspace_id
+          AND dc.embedding IS NOT NULL
+        ORDER BY dc.embedding <=> CAST(:vec AS vector)
+        LIMIT :limit
+    """)
+
+    vec_str = "[" + ",".join(str(v) for v in query_vector) + "]"
+    result = await db.execute(
+        sql,
+        {"vec": vec_str, "workspace_id": workspace_id, "limit": limit},
+    )
+    rows = result.fetchall()
+
+    chunks = [
+        ChunkSearchResult(
+            chunk_id=row.chunk_id,
+            document_id=row.document_id,
+            document_name=row.document_name,
+            chunk_index=row.chunk_index,
+            text=row.raw_text,
+            score=float(row.score),
+        )
+        for row in rows
+    ]
+
+    return ChunkSearchResponse(query=q, results=chunks)

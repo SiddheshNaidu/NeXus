@@ -1,4 +1,4 @@
-"""Search schemas — locked contract for Sprint 0."""
+"""Search schemas — Sprint 0 locked contract + Sprint 3 additions."""
 import uuid
 from typing import Any
 
@@ -47,3 +47,23 @@ class SearchResponse(BaseModel):
     sources: list[SourceItem] = []
     evidence: list[EvidenceItem] = []
     metadata: dict[str, Any] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3 — vector similarity search result schemas
+# ---------------------------------------------------------------------------
+
+class ChunkSearchResult(BaseModel):
+    """A single chunk returned by a vector similarity search."""
+    chunk_id: uuid.UUID
+    document_id: uuid.UUID
+    document_name: str
+    chunk_index: int
+    text: str
+    score: float  # cosine similarity [0, 1]; higher = more relevant
+
+
+class ChunkSearchResponse(BaseModel):
+    """Response envelope for GET /workspaces/{id}/search."""
+    query: str
+    results: list[ChunkSearchResult]

@@ -1,4 +1,4 @@
-"""Document endpoints — Sprint 2.
+"""Document endpoints — Sprint 3 (upgraded from Sprint 2).
 
 POST /workspaces/{workspace_id}/documents  — upload a file (contributor+ only)
 GET  /documents/{document_id}/status       — poll processing state (viewer+)
@@ -17,6 +17,8 @@ from app.db.models.documents import Document
 from app.db.models.jobs import ProcessingJob
 from app.db.models.users import User
 from app.db.session import get_db
+from app.providers import EmbeddingProvider
+from app.providers.embeddings import get_embedding_provider as _get_provider
 from app.schemas.documents import (
     DocumentRead,
     DocumentStatusResponse,
@@ -38,6 +40,14 @@ def get_storage() -> StorageInterface:
     return _storage_module.storage
 
 
+def get_embedder() -> EmbeddingProvider:
+    """FastAPI dependency — returns the active embedding provider.
+
+    Tests override this to inject a mock that avoids real API calls.
+    """
+    return _get_provider()
+
+
 @router.post(
     "/workspaces/{workspace_id}/documents",
     response_model=DocumentUploadResponse,
@@ -51,6 +61,7 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: StorageInterface = Depends(get_storage),
+    embedder: EmbeddingProvider = Depends(get_embedder),
 ) -> DocumentUploadResponse:
     # Permission check — contributor minimum
     await require_workspace_role(db, current_user, workspace_id, Role.CONTRIBUTOR)
@@ -64,6 +75,7 @@ async def upload_document(
         content_type=file.content_type,
         data=data,
         storage=storage,
+        embedding_provider=embedder,
     )
 
     return DocumentUploadResponse(
