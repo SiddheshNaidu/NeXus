@@ -55,8 +55,70 @@
 
 ---
 
-## Sprint 1 — Workspace, Identity, Permissions — PENDING
+## Sprint 1 — Workspace, Identity, Permissions ✅ COMPLETE
 
-## Sprint 2 — Upload and Processing Jobs — PENDING
+### What was built
+
+| Module | Path | Description |
+|--------|------|-------------|
+| Dev auth dependency | `app/core/security.py` | `get_current_user` via `X-Dev-User-ID` header |
+| Permission service | `app/services/permissions.py` | `Role` enum, `role_at_least()`, `require_workspace_role()`, `list_user_workspaces()` — fully decoupled, callable from services and routes |
+| FastAPI auth deps | `app/api/deps.py` | `require_viewer()`, `require_contributor()`, `require_admin()` factory deps |
+| Workspace schemas | `app/schemas/workspaces.py` | Extended with `WorkspaceWithRole`, `MembershipRead` |
+| User schemas | `app/schemas/users.py` | Extended with `MeResponse` |
+| Identity endpoint | `app/api/v1/identity.py` | `GET /api/v1/me` |
+| Workspace endpoints | `app/api/v1/workspaces.py` | `GET /workspaces`, `GET /workspaces/{id}`, `GET /workspaces/{id}/collections` |
+| Sprint 1 fixtures | `tests/conftest_sprint1.py` | NullPool per-test engine, commit+cleanup seed pattern |
+| Sprint 1 tests | `tests/test_permissions.py` | 23 tests covering all acceptance criteria |
+
+### Acceptance criteria
+
+| Criterion | Result |
+|-----------|--------|
+| Viewer / Contributor / Admin permissions enforce correct access | ✅ 8 unit tests + 5 service-layer tests |
+| User A cannot access User B's workspace | ✅ `test_get_workspace_non_member_forbidden` + `test_list_workspaces_only_own` |
+| Permission checks reusable from services | ✅ Service-layer tests call `require_workspace_role()` directly, no HTTP needed |
+| All 27 tests pass (Sprint 0 + Sprint 1) | ✅ 27 passed, 0 failed |
+
+### Notes
+
+- `DATABASE_URL` now points to port `5434` (pgvector container) per externally updated `.env`. Migrations re-run against 5434 successfully.
+- NullPool pattern discovered for asyncpg test isolation: added to AGENTS.md.
+
+---
+
+## Sprint 2 — Upload and Processing Jobs ✅ COMPLETE
+
+### What was built
+
+| Module | Path | Description |
+|--------|------|-------------|
+| Local disk storage | `app/storage/local.py` | `LocalStorage` — saves bytes under `STORAGE_ROOT`, path-traversal safe |
+| `get_storage` dependency | `app/api/v1/documents.py` | FastAPI dep returning the active storage backend; overridable in tests |
+| Document service | `app/services/documents.py` | SHA-256 hash, safe filename, save to disk, insert `Document` + `ProcessingJob`, mock worker |
+| Document schemas | `app/schemas/documents.py` | `DocumentUploadResponse`, `ProcessingJobRead`, added `storage_key` + `document_hash` to `DocumentRead` |
+| Upload endpoint | `POST /api/v1/workspaces/{id}/documents` | Contributor+ only; returns 201 with document + job_id immediately |
+| Status endpoint | `GET /api/v1/documents/{id}/status` | Viewer+ access; returns live processing state |
+| Document GET | `GET /api/v1/documents/{id}` | Viewer+ access |
+| Sprint 2 fixtures | `tests/conftest_sprint2.py` | Injects temp `LocalStorage` via `get_storage` dependency override; `tmp_path` is shared with tests |
+| Sprint 2 tests | `tests/test_upload.py` | 8 tests covering all acceptance criteria |
+| `tests/conftest.py` | Removed shadowing `client` fixture; base conftest now only defines `db_session` |
+| `tests/test_health.py` | Self-contained `client` fixture (no conftest dependency) |
+
+### Acceptance criteria
+
+| Criterion | Result |
+|-----------|--------|
+| File upload saves bytes on disk | ✅ `test_upload_saves_file_on_disk` — verifies exact bytes at `tmp_path/storage/<key>` |
+| `Document` DB record created with correct fields | ✅ `test_upload_creates_document_db_record` |
+| `ProcessingJob` DB record created, mock worker marks completed | ✅ `test_upload_creates_processing_job_db_record` |
+| Viewer blocked from upload (403) | ✅ `test_viewer_blocked_from_upload` |
+| All 35 tests pass (Sprint 0 + 1 + 2) | ✅ 35 passed, 0 failed |
+
+### Key engineering note (AGENTS.md Rule 12)
+
+The root cause of the test isolation failures was `conftest.py` defining a `client` fixture that shadowed the sprint-specific `client` from `conftest_sprint2.py`, and also called `dependency_overrides.clear()` which wiped the `get_storage` override. Resolution: base `conftest.py` must never define a `client` fixture; each sprint owns its `client` in `conftest_sprintN.py`.
+
+---
 
 ## Sprint 3 — AI / Embeddings / Vector Search — PENDING

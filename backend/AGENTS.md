@@ -54,3 +54,51 @@ Stack traces are never returned to callers.
 The `document_chunks.embedding` column is added by a separate migration in Sprint 3.
 Sprint 0 models must not reference the vector type; the local Postgres install may not have
 the `vector` extension. Standard column types only until Sprint 3.
+
+## Rule 9 — asyncpg test isolation requires NullPool
+
+When multiple async tests share a SQLAlchemy connection pool, a failed transaction on one
+connection corrupts subsequent tests with `InterfaceError: cannot rollback; the transaction
+is in error state`. The fix is `NullPool` per test:
+
+```python
+engine = create_async_engine(settings.database_url, poolclass=NullPool)
+```
+
+This creates and discards a fresh connection for every test. Use this pattern in every
+`conftest_sprint*.py` file.
+
+## Rule 10 — Seed data pattern: commit + explicit DELETE cleanup
+
+The asyncpg SAVEPOINT rollback pattern is unreliable with SQLAlchemy asyncio. Instead:
+1. Insert seed rows and `await session.commit()` so they are visible to all connections.
+2. In the fixture's `finally` block, execute explicit `DELETE` statements and `commit()`.
+3. Use `NullPool` (Rule 9) to ensure the cleanup session is also a fresh connection.
+
+## Rule 12 — base conftest.py must never define a `client` fixture
+
+Each sprint defines its own `client` fixture in `conftest_sprintN.py`.
+If `conftest.py` also defines `client`, pytest gives it higher priority and silently uses it
+instead of the sprint-specific one, wiping all per-sprint dependency overrides (including
+`get_storage`). Base `conftest.py` must only contain fixtures that are genuinely sprint-agnostic
+(e.g. a bare `db_session`). Sprint-specific HTTP client setup belongs exclusively in the
+corresponding `conftest_sprintN.py`.
+
+## Rule 13 — Inject test storage via FastAPI dependency override, not module patching
+
+Patching `_doc_svc.storage = ts` at the module level doesn't work when the route captures
+the storage reference at import time. Instead, expose a `get_storage` FastAPI dependency in
+the route module and override it in tests:
+
+```python
+app.dependency_overrides[get_storage] = lambda: LocalStorage(str(tmp_path / "storage"))
+```
+
+The `tmp_path` fixture is function-scoped and shared automatically between the `client`
+fixture and the test function when both are in the same test.
+
+## Rule 11 — DATABASE_URL port may differ across environments
+
+The `.env` file is gitignored and may be changed externally. Always verify the port in
+`settings.database_url` matches the running Postgres instance before running migrations.
+Run `alembic upgrade head` against every new DB target after the URL changes.
