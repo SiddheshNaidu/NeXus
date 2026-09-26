@@ -4,15 +4,26 @@ import * as React from "react";
 import { Navbar } from "@/components/ui/navbar";
 import { ArrowLeft, Textbox, MagnifyingGlassPlus, MagnifyingGlassMinus, FileText } from "@phosphor-icons/react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useParams } from "next/navigation";
 import { evidenceService } from "@/services/evidenceService";
 import { EvidenceContext } from "@/services/types";
+import { EvidenceScene } from "@/components/immersive/EvidenceScene";
+
+class WebGLErrorBoundary extends React.Component<{ children: React.ReactNode, fallback: React.ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: React.ReactNode, fallback: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() { return { hasError: true }; }
+  render() { return this.state.hasError ? this.props.fallback : this.props.children; }
+}
 
 function EvidenceContent({ documentId }: { documentId: string }) {
   const searchParams = useSearchParams();
   const citationId = searchParams.get("citation") || undefined;
   
   const [ctx, setCtx] = React.useState<EvidenceContext | null>(null);
+  const anchorRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
     evidenceService.getEvidenceContext(documentId, citationId).then(setCtx);
@@ -46,7 +57,7 @@ function EvidenceContent({ documentId }: { documentId: string }) {
                     <h3 className="text-sm font-medium text-zinc-300 leading-tight">{ctx.documentTitle}</h3>
                     <div className="flex gap-2 text-[10px] font-mono text-zinc-500 uppercase tracking-widest mt-2">
                       <span>Pg {ctx.page}</span>
-                      {ctx.citationId && <span>â€¢ {ctx.citationId}</span>}
+                      {ctx.citationId && <span>&bull; {ctx.citationId}</span>}
                     </div>
                   </div>
                 </div>
@@ -54,9 +65,9 @@ function EvidenceContent({ documentId }: { documentId: string }) {
 
               <div>
                 <span className="text-[10px] font-mono text-indigo-400 uppercase tracking-[0.2em] mb-4 block">Extracted Evidence Match</span>
-                <div className="relative border-l-2 border-indigo-500 pl-4 py-1">
+                <div className="relative border-l-2 border-indigo-500 pl-4 py-1" ref={anchorRef}>
                   <p className="text-sm text-zinc-400 leading-relaxed font-serif italic">
-                    "{ctx.extractedText}"
+                    "{ctx.extractedText}"`n                  <div className="absolute -right-6 top-1/2 -translate-y-1/2 w-6 h-[1px] bg-indigo-500 hidden lg:block" />
                   </p>
                 </div>
               </div>
@@ -67,7 +78,20 @@ function EvidenceContent({ documentId }: { documentId: string }) {
 
       {/* CENTER COLUMN: Document Viewer */}
       <div className="col-span-1 lg:col-span-9 flex flex-col h-full bg-[#0A0A0A] relative">
-                {/* MOBILE BACK LINK */}
+                <div className="absolute inset-0 z-0 hidden lg:flex items-center justify-center pointer-events-none">
+          {ctx && (
+            <WebGLErrorBoundary 
+              fallback={
+                <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 z-0 opacity-50">
+                  <path d="M 0,50 C 50,50 50,50 100,50" stroke="#6366f1" strokeWidth="0.2" fill="none" className="animate-in fade-in duration-1000" />
+                </svg>
+              }
+            >
+              <EvidenceScene anchorRef={anchorRef} isActive={!!ctx} reducedMotion={false} />
+            </WebGLErrorBoundary>
+          )}
+        </div>
+        {/* MOBILE BACK LINK */}
         <div className="lg:hidden p-4 border-b border-white/5 bg-[#050505] flex items-center">
           <Link href="/search" className="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-zinc-400 hover:text-zinc-200 transition-colors">
             <ArrowLeft size={16} />
@@ -92,7 +116,7 @@ function EvidenceContent({ documentId }: { documentId: string }) {
         </div>
 
         <div className="flex-1 overflow-auto p-6 md:p-12 flex justify-center items-start">
-          <div className="w-full max-w-[850px] min-h-[1100px] bg-[#111113] border border-white/5 shadow-2xl p-12 md:p-20">
+          <div className="w-full max-w-[850px] min-h-[1100px] bg-[#111113]/95 backdrop-blur-sm border border-white/5 shadow-[0_0_50px_rgba(0,0,0,0.5)] p-12 md:p-20 relative z-10">
             {!ctx ? (
               <div className="animate-pulse space-y-8">
                  <div className="h-6 bg-white/5 w-1/3 mb-8" />
@@ -125,15 +149,16 @@ function EvidenceContent({ documentId }: { documentId: string }) {
   );
 }
 
-export default function EvidenceViewer({ params }: { params: Promise<{ documentId: string }> }) {
-  const resolvedParams = React.use(params);
+export default function EvidenceViewer() {
+  const params = useParams();
+  const documentId = params?.documentId as string;
   
   return (
     <main className="min-h-[100dvh] w-full bg-[#050505] flex flex-col text-zinc-50 overflow-hidden">
       <Navbar />
       <div className="flex-1 mt-16 flex flex-col">
         <React.Suspense fallback={<div className="flex-1 bg-[#0A0A0A] border-t border-white/5 p-12">Loading...</div>}>
-          <EvidenceContent documentId={resolvedParams.documentId} />
+          {documentId ? <EvidenceContent documentId={documentId} /> : null}
         </React.Suspense>
       </div>
     </main>

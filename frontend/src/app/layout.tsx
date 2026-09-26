@@ -1,6 +1,7 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { SmoothScroll } from "@/components/SmoothScroll";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -17,6 +18,13 @@ export const metadata: Metadata = {
   description: "Your evidence intelligence workspace.",
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+  themeColor: "#050505",
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -29,6 +37,7 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="min-h-[100dvh] bg-[#050505] text-zinc-50 antialiased selection:bg-indigo-500/30">
+        <SmoothScroll />
         {children}
       </body>
     </html>
