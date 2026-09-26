@@ -186,3 +186,45 @@ The root cause of the test isolation failures was `conftest.py` defining a `clie
 - The ownership check (`conv.user_id != current_user.id`) enforces that even a viewer in the same workspace cannot read or post to another user's conversation.
 - `handle_message()` in `chat.py` is a pure service function with no FastAPI coupling — all providers are passed as arguments.
 - Evidence rows link `chunk_id` + `document_id` + `relevance_score` so the frontend can render exact citations.
+
+---
+
+## Sprint 5 — Streaming AI Chat Responses ✅ COMPLETE
+
+### What was built
+
+| Module | Path | Description |
+|--------|------|-------------|
+| LLM provider (upgraded) | `app/providers/llm.py` | Added `stream_complete()` async generator using `generate_content_stream` in a thread; shared `_build_gemini_args()` helper refactors duplicated message-building logic |
+| Provider interface (upgraded) | `app/providers/__init__.py` | Added `stream_complete()` with a default fallback that delegates to `complete()` so existing providers remain valid without changes |
+| Chat service (upgraded) | `app/services/chat.py` | Added `stream_message()` async generator: embeds → retrieves → yields evidence SSE event → yields text chunk SSE events → commits DB rows → yields done SSE event |
+| Conversations endpoint (upgraded) | `app/api/v1/conversations.py` | Added `POST /conversations/{id}/messages/stream` returning `StreamingResponse(media_type="text/event-stream")`; Sprint 4 endpoint untouched |
+| Sprint 5 fixtures | `tests/conftest_sprint5.py` | `MockStreamingLLMProvider` yields canned reply word-by-word (13 chunks) — no Gemini calls; all 6 FastAPI dep overrides wired |
+| Sprint 5 tests | `tests/test_sprint5.py` | 16 tests covering all 4 acceptance criteria |
+
+### Acceptance criteria
+
+| Criterion | Result |
+|-----------|--------|
+| Streaming endpoint returns HTTP 200 with streaming body | ✅ `TestStreamingEndpointBasic` — 3 tests |
+| Stream yields evidence payload first, then multiple text chunks | ✅ `TestStreamEventSequence` — 6 tests including aggregated text match |
+| DB contains full user + assistant messages + evidence after stream consumed | ✅ `TestDatabasePersistenceAfterStream` — 5 tests |
+| Cross-tenant isolation: 403 for other user's conversation | ✅ `TestStreamingCrossTenantIsolation` — 4 tests including cross-tenant chunk leak check |
+| Sprint 4 non-streaming endpoint still works (regression) | ✅ `TestSprintFourRegressionCheck` |
+| All 91 tests pass (Sprint 0–5) | ✅ 91 passed, 0 failed |
+
+### SSE Event Format
+
+```
+data: {"type": "evidence", "chunks": [{...}, ...]}\n\n
+data: {"type": "text", "text": "<chunk>"}\n\n
+...
+data: {"type": "done"}\n\n
+```
+
+### Key engineering notes
+
+- `stream_complete()` uses a `threading.Thread` + `queue.Queue` pattern to run the synchronous `generate_content_stream` SDK call off the event loop, polling via `run_in_executor(None, queue.get)` so the async loop stays unblocked.
+- The default `stream_complete()` on `LLMProvider` (base class) delegates to `complete()` so Sprint 4 `MockLLMProvider` continues to work for the non-streaming endpoint without modification.
+- DB commit happens inside `stream_message()` **after** yielding all text chunks and **before** the `done` sentinel — ensuring persistence completes while the client is still connected.
+- `MockStreamingLLMProvider` yields `word` then `" " + word` (no trailing space) so `"".join(chunks)` exactly equals `CANNED_REPLY`, enabling precise DB content assertions.

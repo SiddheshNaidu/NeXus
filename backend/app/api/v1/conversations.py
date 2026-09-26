@@ -1,8 +1,9 @@
-"""Conversation endpoints — Sprint 4.
+"""Conversation endpoints — Sprint 4/5.
 
-POST /workspaces/{workspace_id}/conversations    — create a new chat thread (viewer+)
-GET  /conversations/{conversation_id}            — get conversation + messages (viewer+)
-POST /conversations/{conversation_id}/messages   — send a user message, get AI reply (viewer+)
+POST /workspaces/{workspace_id}/conversations           — create a new chat thread (viewer+)
+GET  /conversations/{conversation_id}                   — get conversation + messages (viewer+)
+POST /conversations/{conversation_id}/messages          — send a user message, get AI reply (viewer+)
+POST /conversations/{conversation_id}/messages/stream   — stream AI reply via SSE (Sprint 5)
 
 All endpoints require workspace membership (any role).
 Users can only access conversations they own inside workspaces they belong to.
@@ -11,6 +12,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +27,7 @@ from app.providers.embeddings import get_embedding_provider as _get_embedder
 from app.providers.llm import get_llm_provider as _get_llm
 from app.schemas.conversations import ConversationRead, MessageRead
 from app.schemas.evidence import EvidenceRead
-from app.services.chat import handle_message
+from app.services.chat import handle_message, stream_message
 from app.services.permissions import Role, require_workspace_role
 
 router = APIRouter(tags=["conversations"])
@@ -196,4 +198,48 @@ async def send_message(
         user_message=MessageRead.model_validate(user_msg),
         assistant_message=MessageRead.model_validate(chat_result.assistant_message),
         evidence=[EvidenceRead.model_validate(ev) for ev in chat_result.evidence],
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages/stream",
+    status_code=200,
+    summary="Stream message (SSE)",
+    description=(
+        "Send a user message and receive the AI reply as a Server-Sent Events stream. "
+        "Events: evidence payload first, then text chunks, then a done sentinel. "
+        "Database rows are committed after the stream completes."
+    ),
+)
+async def stream_message_endpoint(
+    conversation_id: uuid.UUID,
+    body: SendMessageRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    embedder: EmbeddingProvider = Depends(get_embedder),
+    llm: LLMProvider = Depends(get_llm),
+) -> StreamingResponse:
+    result = await db.execute(
+        select(Conversation).where(Conversation.id == conversation_id)
+    )
+    conv = result.scalar_one_or_none()
+    if conv is None:
+        raise NotFoundError(f"Conversation {conversation_id} not found.")
+
+    # Verify caller is a workspace member
+    await require_workspace_role(db, current_user, conv.workspace_id, Role.VIEWER)
+
+    # Verify caller owns this conversation
+    if conv.user_id != current_user.id:
+        raise ForbiddenError("You do not have access to this conversation.")
+
+    return StreamingResponse(
+        stream_message(
+            db=db,
+            conversation=conv,
+            user_query=body.content,
+            embedder=embedder,
+            llm=llm,
+        ),
+        media_type="text/event-stream",
     )

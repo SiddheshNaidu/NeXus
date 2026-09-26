@@ -1,4 +1,4 @@
-"""Chat service — Sprint 4.
+"""Chat service — Sprint 4/5.
 
 RAG orchestration pipeline for a single user message:
   1. Embed the query (reuse Sprint 3 embedding provider).
@@ -13,14 +13,21 @@ RAG orchestration pipeline for a single user message:
          and document_id with the similarity score.
   6. Return the assistant message and evidence list to the caller.
 
+Sprint 5 adds stream_message() — an async generator that yields SSE-formatted
+events for evidence and text chunks, then commits DB rows after the stream ends.
+
 The service is pure business logic — no FastAPI dependencies here.
 Providers are passed as arguments so tests can inject mocks.
 """
+import json
 import uuid
+from collections.abc import AsyncIterator
 from typing import NamedTuple
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from sqlalchemy import select
 
 from app.db.models.conversations import Conversation, Message
 from app.db.models.evidence import Evidence
@@ -198,3 +205,100 @@ async def handle_message(
         evidence=evidence_rows,
         retrieved_chunks=chunks,
     )
+
+
+async def stream_message(
+    db: AsyncSession,
+    conversation: Conversation,
+    user_query: str,
+    embedder: EmbeddingProvider,
+    llm: LLMProvider,
+) -> AsyncIterator[str]:
+    """Streaming RAG pipeline — yields SSE-formatted events then persists to DB.
+
+    Event sequence:
+      1. ``data: {"type": "evidence", "chunks": [...]}\\n\\n``
+      2. One or more ``data: {"type": "text", "text": "<chunk>"}\\n\\n``
+      3. ``data: {"type": "done"}\\n\\n``
+
+    After the "done" event the user message, aggregated assistant message,
+    and all evidence rows are committed to the database.
+    """
+    workspace_id = conversation.workspace_id
+
+    # 1. Embed the query
+    query_vectors = await embedder.embed([user_query])
+    query_vector = query_vectors[0]
+
+    # 2. Retrieve relevant chunks
+    chunks = await _retrieve_chunks(db, workspace_id, query_vector)
+
+    # 3. Yield evidence payload first
+    evidence_payload = [
+        {
+            "chunk_id": str(c.chunk_id),
+            "document_id": str(c.document_id),
+            "document_name": c.document_name,
+            "chunk_index": c.chunk_index,
+            "text": c.text,
+            "score": c.score,
+        }
+        for c in chunks
+    ]
+    yield f"data: {json.dumps({'type': 'evidence', 'chunks': evidence_payload})}\n\n"
+
+    # 4. Build conversation history + system prompt
+    result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.asc())
+    )
+    history = [
+        {"role": msg.role, "content": msg.content}
+        for msg in result.scalars().all()
+    ]
+    context = _build_context(chunks)
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT.format(context=context)},
+        *history,
+        {"role": "user", "content": user_query},
+    ]
+
+    # 5. Stream text chunks from LLM
+    full_reply_parts: list[str] = []
+    async for chunk_text in llm.stream_complete(messages):
+        full_reply_parts.append(chunk_text)
+        yield f"data: {json.dumps({'type': 'text', 'text': chunk_text})}\n\n"
+
+    # 6. Persist user message, aggregated assistant message, and evidence
+    answer_text = "".join(full_reply_parts)
+
+    user_msg = Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=user_query,
+    )
+    db.add(user_msg)
+
+    assistant_msg = Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content=answer_text,
+    )
+    db.add(assistant_msg)
+
+    evidence_rows: list[Evidence] = []
+    for chunk in chunks:
+        ev = Evidence(
+            chunk_id=chunk.chunk_id,
+            document_id=chunk.document_id,
+            text=chunk.text,
+            relevance_score=chunk.score,
+        )
+        db.add(ev)
+        evidence_rows.append(ev)
+
+    await db.commit()
+
+    # 7. Signal completion
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
