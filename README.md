@@ -29,16 +29,25 @@ NEXUS does not guess. If evidence is insufficient or conflicting, the engine exp
 The system operates across a decoupled, asynchronous pipeline, strictly isolating tenant data while bridging synchronous AI SDKs into a high-performance async event loop.
 
 ```mermaid
-graph TD
-    classDef core fill:#050505,stroke:#4f46e5,stroke-width:1px,color:#f4f4f5;
-    classDef ext fill:#0a0a0a,stroke:#3f3f46,stroke-width:1px,color:#a1a1aa;
+flowchart LR
+    %% Theme-agnostic design: GitHub will automatically style this for Light/Dark mode
+    
+    subgraph Ingestion [1. Document Ingestion]
+        direction LR
+        Upload([Upload]) --> Chunk[Chunking & Sanitize]
+        Chunk --> Embed1[Gemini Embedding]
+        Embed1 --> DB[(pgvector)]
+    end
 
-    U[User Query]:::core --> E[Gemini Embedding Matrix]:::ext
-    E --> V[pgvector Similarity Search]:::core
-    V --> C[Context Assembly & RBAC]:::core
-    C --> L[Gemini Flash LLM]:::ext
-    L --> S[SSE Telemetry Stream]:::core
-    S --> UI[NEXUS Canvas]:::core
+    subgraph Retrieval [2. Query & Generation]
+        direction LR
+        User([User Query]) --> Search[Vector Search]
+        Search --> RBAC{RBAC Context}
+        RBAC --> LLM[Gemini Flash LLM]
+        LLM --> Stream([NEXUS Canvas])
+    end
+
+    DB -.->|Cosine Similarity| Search
 ```
 
 ### The Ingestion Matrix
