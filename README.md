@@ -1,8 +1,10 @@
-﻿# NEXUS
+<div align="center">
 
-**AI Evidence Intelligence Workspace**
+# Ｎ Ｅ Ｘ Ｕ Ｓ
 
-*Ask what your documents know.*
+**AI EVIDENCE INTELLIGENCE WORKSPACE**
+
+*Ask what your documents know. Get answers with absolute proof.*
 
 [![Next.js](https://img.shields.io/badge/Next.js-16.3-black?logo=nextdotjs)](https://nextjs.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)](https://fastapi.tiangolo.com)
@@ -10,328 +12,147 @@
 [![Gemini](https://img.shields.io/badge/Google_Gemini-AI-4285F4?logo=google)](https://ai.google.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)](https://www.typescriptlang.org)
 
----
-
-## What is NEXUS?
-
-NEXUS is an evidence intelligence platform. Upload documents. Ask questions. Get answers with proof.
-
-The AI assistant, **NEX**, retrieves relevant chunks from your indexed documents, combines information across sources, and returns a grounded answer with clickable citations that trace every claim back to the exact page and passage it came from.
-
-NEXUS does not guess. If the evidence is insufficient or conflicting, it says so. No fabricated citations. No hallucinated page numbers. Every displayed reference originates from backend data.
+</div>
 
 ---
 
-## The Architecture
+## ⮞ SYSTEM OVERVIEW
 
-The system works in two distinct phases, both fully implemented.
+NEXUS is a next-generation Retrieval-Augmented Generation (RAG) platform designed for precision knowledge extraction. Upload heterogeneous documents (PDF, DOCX, TXT). Ask natural-language questions. Receive grounded answers with exact, clickable citations tracing back to the original source. 
 
-**Ingestion** routes each uploaded file through a detection pipeline, selecting the correct processing path based on content type — text extraction for standard PDFs, OCR for scanned documents and images, structured parsing for table-heavy content. Documents move through the states `queued -> detecting -> routing -> extracting -> structuring -> indexing -> ready`. The frontend reflects this asynchronously; the interface never blocks on the pipeline.
+NEXUS does not guess. If evidence is insufficient or conflicting, the engine explicitly reports the anomaly rather than hallucinating an answer.
 
-**Retrieval** begins when a user submits a query. NEX embeds the question using Google Gemini, performs pgvector cosine-similarity search scoped strictly to the user's workspace, constructs a context block from the top-5 chunks, and streams the answer token-by-token via SSE. Evidence rows are persisted alongside every response so citations are always traceable to a real stored chunk.
+---
 
-```
-QUERY
-  |
-  v
-EMBED (Google Gemini Embeddings)
-  |
-  v
-VECTOR SEARCH  <-- pgvector cosine similarity, workspace-scoped
-  |
-  v
-CONTEXT ASSEMBLY  <-- top-5 chunks, source-attributed
-  |
-  v
-LLM GENERATION  <-- Gemini Flash, system-prompted to cite only evidence
-  |
-  v
-SSE STREAM -> evidence event -> text tokens -> done event
-  |
-  v
-DB PERSIST  <-- user message, assistant message, evidence rows
+## ⮞ CORE ARCHITECTURE
+
+The system operates across a decoupled, asynchronous pipeline, strictly isolating tenant data while bridging synchronous AI SDKs into a high-performance async event loop.
+
+```mermaid
+graph TD
+    classDef core fill:#050505,stroke:#4f46e5,stroke-width:1px,color:#f4f4f5;
+    classDef ext fill:#0a0a0a,stroke:#3f3f46,stroke-width:1px,color:#a1a1aa;
+
+    U[User Query]:::core --> E[Gemini Embedding Matrix]:::ext
+    E --> V[pgvector Similarity Search]:::core
+    V --> C[Context Assembly & RBAC]:::core
+    C --> L[Gemini Flash LLM]:::ext
+    L --> S[SSE Telemetry Stream]:::core
+    S --> UI[NEXUS Canvas]:::core
 ```
 
----
+### The Ingestion Matrix
+Documents pass through a format-aware detection pipeline:
+`QUEUED` → `DETECTING` → `ROUTING` → `EXTRACTING` → `STRUCTURING` → `INDEXING` → `READY`
 
-## The Interface
+- **Extraction:** Native parsing via `pdfplumber` and `python-docx`.
+- **Sanitization:** Unconditional null-byte (`\x00`) stripping ensures raw binary encoding artefacts never crash the PostgreSQL `TEXT` columns.
+- **Vectorization:** Text is chunked (512 chars, 64 overlap) and mapped into 1536-dimensional space using `gemini-embedding-2`.
 
-The workspace is a three-column layout built on `#050505` black, 1px structural grid lines, Geist Sans/Mono typography, and an indigo accent.
-
-**Source Rail** (left column) lists all documents indexed in the current workspace with their processing status. Empty state prompts ingestion.
-
-**Answer Canvas** (center column) renders the conversation thread. NEX answers stream progressively. Citation chips appear once the structured response arrives, not before. Clicking a chip opens the Evidence Inspector inline on desktop or navigates to the full Evidence Viewer on mobile.
-
-**Evidence Inspector** (right column) displays the active citation: document title, page number, section, and the extracted passage rendered in serif italic against an indigo left border. An *Inspect Document* link navigates to the full evidence page for that document.
-
-Edge states are explicit and rendered from backend data:
-
-| State | Trigger |
-|---|---|
-| `NEXUS Verified Response` | Answered with citations |
-| `Insufficient Evidence` | No supporting information found |
-| `Evidence Conflict Detected` | Sources disagree; both shown side by side |
-| `No Results` | No relevant evidence across indexed sources |
-| `Clearance Restricted` | Relevant information exists; user lacks access |
-| `Engine Error` | Backend unreachable or failed |
-
-The home page features a WebGL NEX model sequence (Three.js / React Three Fiber), particle contact field, aether flow background, and Lenis smooth scrolling with GSAP and Motion animations.
+### The Retrieval Engine
+Search is completely deterministic and workspace-scoped:
+- **Tenant Isolation:** Cosine similarity (`<=>`) is strictly bound via SQL JOINs (`documents d ON d.id = dc.document_id WHERE d.workspace_id = :ws`). Cross-tenant leakage is mathematically impossible.
+- **Asynchronous Bridging:** Synchronous AI SDKs are dispatched to the thread pool via `run_in_executor(None, _call)`, preventing event-loop blocking during embedding or generation.
 
 ---
 
-## Tech Stack
+## ⮞ THE INTERFACE
 
-### Frontend
+A cinematic, three-column cybernetic workspace built on `#050505` black backgrounds, 1px structural grid lines, and Geist typography.
 
-| Layer | Technology |
-|---|---|
-| Framework | Next.js 16.3 (App Router) |
-| Language | TypeScript 5 |
-| Styling | Tailwind CSS v4 |
-| Animation | Motion (Framer Motion), GSAP 3, Anime.js 4, Lenis |
-| 3D | Three.js, React Three Fiber, Drei |
-| Icons | Phosphor Icons |
-| HTTP | Fetch API with SSE streaming |
+*   **Source Rail (Left):** Real-time telemetry on indexed workspace documents.
+*   **Answer Canvas (Center):** Server-Sent Events (SSE) stream the AI response progressively. Citation chips materialize only after the final structured payload is validated.
+*   **Evidence Inspector (Right):** Select a citation to inspect the raw extracted passage, complete with document metadata, page numbers, and exact phrasing. 
 
-### Backend
-
-| Layer | Technology |
-|---|---|
-| Framework | FastAPI 0.115+ (async) |
-| Language | Python 3.12+ |
-| ORM | SQLAlchemy 2.0 (async) |
-| Database | PostgreSQL 16 + pgvector |
-| Migrations | Alembic |
-| Validation | Pydantic v2 |
-| AI Provider | Google Gemini (LLM + Embeddings) |
-| Testing | pytest, pytest-asyncio, httpx |
+The landing sequence features a WebGL `NEX` model (Three.js / React Three Fiber), particle contact fields, and an Aether Flow background driven by GSAP and Framer Motion.
 
 ---
 
-## Project Structure
+## ⮞ TECH STACK
 
-```
-NeXus/
-├── frontend/
-│   └── src/
-│       ├── app/
-│       │   ├── page.tsx                          # Home: knowledge base + 3D hero
-│       │   ├── search/page.tsx                   # Three-column workspace
-│       │   ├── upload/page.tsx                   # Document ingestion
-│       │   └── evidence/[documentId]/page.tsx    # Full evidence viewer
-│       ├── components/
-│       │   ├── immersive/                        # WebGL scenes (NEXsequence, EvidenceScene)
-│       │   └── ui/                               # Navbar, particles, hero, story section
-│       ├── services/
-│       │   ├── types.ts                          # TypeScript contracts (derived from Pydantic schemas)
-│       │   ├── apiClient.ts                      # Fetch + SSE transport layer
-│       │   ├── searchService.ts                  # Conversation creation, streaming questions
-│       │   ├── documentsService.ts
-│       │   └── evidenceService.ts
-│       └── hooks/
-│           ├── useNexusSession.ts                # Workspace + identity resolution
-│           └── useAudioReactive.ts
-│
-└── backend/
-    └── app/
-        ├── main.py                               # CORS, error handlers, router mount
-        ├── core/
-        │   ├── config.py                         # Pydantic settings (DB, LLM keys, storage)
-        │   ├── security.py
-        │   └── errors.py                         # NexusError + exception handlers
-        ├── db/
-        │   ├── session.py                        # Async SQLAlchemy engine
-        │   └── models/                           # users, workspaces, documents, chunks, evidence
-        ├── schemas/                              # Pydantic v2 request/response shapes
-        ├── services/
-        │   ├── chat.py                           # RAG: embed -> retrieve -> generate -> persist
-        │   ├── documents.py
-        │   ├── permissions.py
-        │   └── evidence.py
-        ├── providers/
-        │   ├── embeddings.py                     # Gemini embedding abstraction
-        │   └── llm.py                            # Gemini LLM abstraction (complete + stream)
-        └── api/v1/                               # Route handlers
-```
+### 1. Frontend Terminal
+*   **Core:** Next.js 16.3 (App Router), TypeScript 5, Tailwind CSS v4
+*   **Motion & 3D:** Motion (Framer), GSAP 3, Anime.js, Lenis, Three.js, React Three Fiber
+*   **Networking:** Fetch API with native SSE parsing
+
+### 2. Backend Core
+*   **Core:** FastAPI 0.115+ (Async), Python 3.12+
+*   **Data Persistence:** PostgreSQL 16 + pgvector, SQLAlchemy 2.0 (Async), Alembic
+*   **AI Providers:** Google Gemini API (`gemini-2.0-flash-lite`, `gemini-embedding-2`)
+*   **Validation:** Pydantic v2
 
 ---
 
-## Getting Started
+## ⮞ INITIALIZATION SEQUENCE
 
 ### Prerequisites
+*   Node.js 20+
+*   Python 3.12+
+*   Docker (for PostgreSQL/pgvector)
+*   Google Gemini API Key
 
-- Node.js 20+
-- Python 3.12+
-- Docker (for the database)
-- A Google Gemini API key
-
-### 1. Start the database
-
+### Step 1: Ignite the Database
 ```bash
 cd backend
 docker-compose up -d
 ```
+*Engages PostgreSQL 16 with pgvector on port `5432`.*
 
-This starts PostgreSQL 16 with the pgvector extension on port `5432`.
-
-### 2. Configure the backend
-
+### Step 2: Configure Environment
 ```bash
 cd backend
 cp .env.example .env
 ```
-
-Edit `.env` and fill in your credentials:
-
+Inject your credentials into `.env`:
 ```env
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/nexus
-
 LLM_PROVIDER=google
-LLM_MODEL=gemini-2.0/3.X-flash-lite
-LLM_API_KEY=your_google_api_key_here
-
+LLM_MODEL=gemini-2.0-flash-lite
+LLM_API_KEY=your_gemini_key
 EMBEDDING_PROVIDER=google
 EMBEDDING_MODEL=gemini-embedding-2
-EMBEDDING_API_KEY=your_google_api_key_here
-EMBEDDING_DIMENSION=1536
-
+EMBEDDING_API_KEY=your_gemini_key
 STORAGE_ROOT=./storage
 ```
 
-### 3. Install and run the backend
-
+### Step 3: Boot Backend Engine
 ```bash
 pip install -r requirements.txt
 alembic upgrade head
 fastapi dev app/main.py
 ```
+*API active at `http://localhost:8000`. OpenAPI schema at `/docs`.*
 
-API runs at `http://localhost:8000`. Interactive docs at `/docs`.
-
-### 4. Run the frontend
-
+### Step 4: Launch Frontend Interface
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-
-Frontend runs at `http://localhost:3000`.
-
----
-
-## API Reference
-
-Full OpenAPI documentation is available at `http://localhost:8000/docs`.
-
-```
-POST   /api/v1/workspaces/
-GET    /api/v1/workspaces/{id}/
-
-POST   /api/v1/documents/upload                    Upload document (multipart/form-data)
-GET    /api/v1/documents/{id}/status               Processing status + stage + progress
-GET    /api/v1/documents/?workspace_id=<id>        List workspace documents
-
-POST   /api/v1/conversations/                      Create conversation
-POST   /api/v1/conversations/{id}/messages         Send message (non-streaming)
-GET    /api/v1/conversations/{id}/messages/stream  SSE streaming response
-GET    /api/v1/conversations/{id}/messages         Conversation history
-
-GET    /api/v1/evidence/{id}/
-GET    /api/v1/health
-```
-
-**SSE streaming format:**
-
-```
-data: {"type": "evidence", "chunks": [...]}
-
-data: {"type": "text", "text": "The reimbursement limit is..."}
-
-data: {"type": "done"}
-```
-
-Evidence arrives before the text stream begins. Citation chips render only after the `done` event.
+*Terminal active at `http://localhost:3000`.*
 
 ---
 
-## The Evidence Contract
+## ⮞ SECURITY & ACCESS CONTROL (RBAC)
 
-Every evidence object traces back to a stored chunk in the database. The backend never manufactures page numbers, source names, or supporting text. The frontend never infers them.
+NEXUS enforces a strict Role-Based Access Control matrix (`VIEWER`, `CONTRIBUTOR`, `ADMIN`).
 
-```typescript
-interface EvidenceRead {
-  id: string;
-  chunk_id: string;
-  document_id: string;
-  page_number: number | null;
-  section: string | null;
-  text: string;
-  relevance_score: number | null;
-}
-```
-
-The security boundary is the backend. Permissions are enforced before retrieval, not after. Unauthorized content never enters the LLM context.
+1.  **Client-Side Guardrails:** Batch uploads (max 10 files) are validated for MIME type and size (15MB docs, 5MB images) before network transmission.
+2.  **API Verification:** The `require_workspace_role()` permission service is the single enforcement point for all protected endpoints.
+3.  **Data Escapement Prevention:** Unauthorized content never enters the LLM context window. Access restriction errors (`403`) are surfaced gracefully in the UI.
 
 ---
 
-## Roles and Permissions
+## ⮞ API TELEMETRY
 
-| Role | Upload | Search | Manage Access |
-|---|---|---|---|
-| Viewer | No | Yes | No |
-| Contributor | Yes | Yes | No |
-| Admin | Yes | Yes | Yes |
-
-Permissions apply to both documents and collections. Access is not controlled by hiding UI elements.
-
----
-
-## Processing Pipeline
-
-```
-QUEUED -> DETECTING -> ROUTING -> EXTRACTING -> STRUCTURING -> INDEXING -> READY
-```
-
-| Content Type | Pipeline |
-|---|---|
-| Standard PDF (selectable text) | Text extraction |
-| Scanned PDF | OCR pipeline |
-| PNG / JPEG / WebP | Vision / OCR |
-| Table-heavy documents | Structured table parsing |
-
-A document reaches `READY` only after indexing succeeds. Any critical failure transitions it to `FAILED` and preserves the error code and message for display.
+| Method | Endpoint | Function |
+| :--- | :--- | :--- |
+| `POST` | `/api/v1/workspaces/` | Initialize workspace |
+| `POST` | `/api/v1/documents/upload` | Ingest multi-format documents |
+| `GET`  | `/api/v1/documents/{id}/status`| Poll processing matrix |
+| `POST` | `/api/v1/conversations/` | Open communication channel |
+| `GET`  | `/api/v1/conversations/{id}/messages/stream`| Stream SSE response |
 
 ---
-
-## Environment Variables
-
-| Variable | Description | Default |
-|---|---|---|
-| `DATABASE_URL` | PostgreSQL async connection string | `postgresql+asyncpg://...` |
-| `STORAGE_ROOT` | Local file storage path | `./storage` |
-| `LLM_PROVIDER` | LLM provider identifier | `google` |
-| `LLM_MODEL` | Model name | `gemini-2.0-flash-lite` |
-| `LLM_API_KEY` | Provider API key | — |
-| `EMBEDDING_PROVIDER` | Embedding provider | `google` |
-| `EMBEDDING_MODEL` | Embedding model name | `gemini-embedding-2` |
-| `EMBEDDING_API_KEY` | Provider API key | — |
-| `EMBEDDING_DIMENSION` | Vector dimension | `1536` |
-| `DEBUG` | Enable debug mode | `false` |
-
----
-
-## Running Tests
-
-```bash
-cd backend
-pytest
-```
-
-Test suites cover health checks, permissions enforcement, document upload and processing, search pipeline, and streaming evidence. Fixtures span five sprint configurations in `tests/conftest_sprint*.py`.
-
----
-
 *Built for HackStreak Third-Year Problem Statement.*
-
-*Ask NEX. Get the answer. See the proof.*
+*NEXUS Engineering // "Truth through evidence."*
