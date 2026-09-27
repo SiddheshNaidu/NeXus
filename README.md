@@ -187,7 +187,7 @@ Edit `.env` and fill in your credentials:
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/nexus
 
 LLM_PROVIDER=google
-LLM_MODEL=gemini-2.0-flash-lite
+LLM_MODEL=gemini-2.0/3.X-flash-lite
 LLM_API_KEY=your_google_api_key_here
 
 EMBEDDING_PROVIDER=google
@@ -318,28 +318,6 @@ A document reaches `READY` only after indexing succeeds. Any critical failure tr
 | `EMBEDDING_API_KEY` | Provider API key | — |
 | `EMBEDDING_DIMENSION` | Vector dimension | `1536` |
 | `DEBUG` | Enable debug mode | `false` |
-
----
-
-## Design System
-
-- **Background:** `#050505` (not `zinc-950`)
-- **Answer Canvas:** `#0A0A0A`
-- **Borders:** 1px `white/5` to `white/10` structural lines
-- **Accent:** `indigo-400` / `indigo-500`
-- **Typography:** Geist Sans for headlines and body; Geist Mono for IDs, timestamps, and status labels; serif italic for evidence passages
-- **Buttons:** Sharp corners, 2-4px radius maximum
-- **Motion:** Spring physics, GPU-accelerated (`transform` and `opacity` only)
-
----
-
-## Build State
-
-**Phase 03: Real Product Vertical Slice — COMPLETE / DEMO-READY**
-
-Full pipeline from document upload through indexed retrieval, streaming RAG generation, and evidence attribution is functional end-to-end. Three-column workspace, evidence inspector, and all edge states implemented and verified.
-
-Phase 04 (Advanced Visuals & Motion, or Workspace Collaboration) awaiting authorization.
 
 ---
 
