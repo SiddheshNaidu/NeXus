@@ -8,19 +8,18 @@ GET /workspaces/{id}/search?q={query}        — vector similarity search (viewe
 import uuid
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import NotFoundError
 from app.core.security import get_current_user
-from app.db.models.documents import Document, DocumentChunk
 from app.db.models.users import User
 from app.db.models.workspaces import Collection
 from app.db.session import get_db
 from app.providers import EmbeddingProvider
-from app.providers.embeddings import embed_query, get_embedding_provider as _get_provider
+from app.providers.embeddings import get_embedding_provider as _get_provider
 from app.schemas.search import ChunkSearchResult, ChunkSearchResponse
 from app.schemas.workspaces import CollectionRead, WorkspaceWithRole
+from app.services.chat import _retrieve_chunks
 from app.services.permissions import (
     Role,
     get_workspace_or_404,
@@ -120,45 +119,23 @@ async def search_workspace(
     # Permission: viewer minimum
     await require_workspace_role(db, current_user, workspace_id, Role.VIEWER)
 
-    # Embed the query using RETRIEVAL_QUERY task type
-    from app.providers.embeddings import embed_query as _embed_query
-    query_vector = await _embed_query(q)
+    # Embed the query via the injected provider (mockable in tests)
+    query_vectors = await embedder.embed([q])
+    query_vector = query_vectors[0]
 
-    # Cosine similarity search — scoped to this workspace only (cross-tenant isolation)
-    # We join document_chunks → documents to filter by workspace_id
-    sql = text("""
-        SELECT
-            dc.id            AS chunk_id,
-            dc.document_id,
-            dc.chunk_index,
-            dc.raw_text,
-            d.name           AS document_name,
-            1 - (dc.embedding <=> CAST(:vec AS vector)) AS score
-        FROM document_chunks dc
-        JOIN documents d ON d.id = dc.document_id
-        WHERE d.workspace_id = :workspace_id
-          AND dc.embedding IS NOT NULL
-        ORDER BY dc.embedding <=> CAST(:vec AS vector)
-        LIMIT :limit
-    """)
-
-    vec_str = "[" + ",".join(str(v) for v in query_vector) + "]"
-    result = await db.execute(
-        sql,
-        {"vec": vec_str, "workspace_id": workspace_id, "limit": limit},
-    )
-    rows = result.fetchall()
+    # Adaptive Top-K + score-gap filter (shared with the chat RAG path)
+    retrieved = await _retrieve_chunks(db, workspace_id, query_vector, top_k=limit)
 
     chunks = [
         ChunkSearchResult(
-            chunk_id=row.chunk_id,
-            document_id=row.document_id,
-            document_name=row.document_name,
-            chunk_index=row.chunk_index,
-            text=row.raw_text,
-            score=float(row.score),
+            chunk_id=c.chunk_id,
+            document_id=c.document_id,
+            document_name=c.document_name,
+            chunk_index=c.chunk_index,
+            text=c.text,
+            score=c.score,
         )
-        for row in rows
+        for c in retrieved
     ]
 
     return ChunkSearchResponse(query=q, results=chunks)

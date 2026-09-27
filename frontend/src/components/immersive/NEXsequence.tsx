@@ -136,13 +136,24 @@ export function NEXsequence() {
 
       const playPromise = audio.play();
       if (playPromise !== undefined) {
-        playPromise.catch((err) => {
-          console.warn("Audio playback fallback to speech synthesis:", err);
+        playPromise.catch((err: Error) => {
+          // NotSupportedError = audio file not found / format unsupported.
+          // AbortError = play() interrupted by a subsequent call — both are expected.
+          const isExpected = err.name === "NotSupportedError" || err.name === "AbortError";
+          if (!isExpected) {
+            console.warn("[NEX] Unexpected audio playback error:", err);
+          }
           if ("speechSynthesis" in window) {
             window.speechSynthesis.cancel();
             const utterance = new SpeechSynthesisUtterance(fallbackText);
             const voices = window.speechSynthesis.getVoices();
-            const preferredVoice = voices.find((v) => v.name.includes("Google UK English Male") || v.name.includes("Microsoft Mark") || v.name.includes("Zira")) || voices[0];
+            const preferredVoice =
+              voices.find(
+                (v) =>
+                  v.name.includes("Google UK English Male") ||
+                  v.name.includes("Microsoft Mark") ||
+                  v.name.includes("Zira"),
+              ) || voices[0];
             if (preferredVoice) utterance.voice = preferredVoice;
             utterance.pitch = 0.8;
             utterance.rate = 0.9;

@@ -37,7 +37,11 @@ from app.storage.local import LocalStorage
 # ---------------------------------------------------------------------------
 
 class MockEmbeddingProvider(EmbeddingProvider):
-    """Returns deterministic unit vectors — never calls Gemini."""
+    """Returns deterministic unit vectors — never calls Gemini.
+
+    All texts map to the same unit vector so query↔chunk cosine similarity
+    is 1.0, staying above the adaptive absolute floor used in production.
+    """
 
     DIMENSION = 1536
 
@@ -49,14 +53,10 @@ class MockEmbeddingProvider(EmbeddingProvider):
         return self.DIMENSION
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        vectors: list[list[float]] = []
-        for text in texts:
-            vec = [0.0] * self.DIMENSION
-            idx = hash(text[:64]) % self.DIMENSION
-            vec[idx] = 1.0
-            vectors.append(vec)
         self.call_count += len(texts)
-        return vectors
+        unit = [0.0] * self.DIMENSION
+        unit[0] = 1.0
+        return [list(unit) for _ in texts]
 
 
 class MockLLMProvider(LLMProvider):

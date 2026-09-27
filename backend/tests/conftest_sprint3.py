@@ -37,8 +37,10 @@ from app.storage.local import LocalStorage
 class MockEmbeddingProvider(EmbeddingProvider):
     """Returns deterministic unit vectors; never calls Gemini.
 
-    The i-th text in a batch gets a vector with 1.0 at position (call_count + i)
-    mod 1536, so vectors are distinct and predictable.
+    All texts map to the same unit vector so query↔chunk cosine similarity
+    is 1.0 in tests.  This keeps retrieval above the adaptive absolute floor
+    while still exercising the full search SQL path.  Threshold filtering
+    itself is covered by a dedicated hand-crafted-vector test.
     """
 
     DIMENSION = 1536
@@ -51,15 +53,10 @@ class MockEmbeddingProvider(EmbeddingProvider):
         return self.DIMENSION
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        vectors: list[list[float]] = []
-        for i, text in enumerate(texts):
-            vec = [0.0] * self.DIMENSION
-            # Use a hash of the text so similar text gets a similar index
-            idx = hash(text[:64]) % self.DIMENSION
-            vec[idx] = 1.0
-            vectors.append(vec)
         self._call_count += len(texts)
-        return vectors
+        unit = [0.0] * self.DIMENSION
+        unit[0] = 1.0
+        return [list(unit) for _ in texts]
 
 
 def _unit_vec(idx: int, dim: int = 1536) -> list[float]:

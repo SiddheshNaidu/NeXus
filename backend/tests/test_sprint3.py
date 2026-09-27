@@ -238,6 +238,9 @@ class TestVectorSearch:
         assert "text" in first
         assert "score" in first
         assert isinstance(first["score"], float)
+        assert first["score"] >= 0.45, (
+            f"Search must only return chunks with similarity >= 0.45, got {first['score']}"
+        )
 
     @pytest.mark.asyncio
     async def test_viewer_can_search(
@@ -296,6 +299,121 @@ class TestVectorSearch:
                 assert str(row.workspace_id) == str(seed3.workspace_a.id), (
                     f"Result from wrong workspace: {row.workspace_id}"
                 )
+
+    @pytest.mark.asyncio
+    async def test_adaptive_filter_drops_noise_keeps_relevant(
+        self, db_session: AsyncSession, seed3
+    ):
+        """Absolute floor + score-gap keep strong hits and drop orthogonal noise.
+
+        Plants two hand-crafted embeddings:
+          - relevant: identical to the query vector → similarity 1.0
+          - noise:    orthogonal to the query vector → similarity 0.0
+        Only the relevant chunk should be returned.  A query orthogonal to
+        both returns an empty list (insufficient evidence).
+        """
+        from app.db.models.documents import Document, DocumentChunk
+        from app.services.chat import _retrieve_chunks
+
+        dim = 1536
+        relevant_vec = [0.0] * dim
+        relevant_vec[0] = 1.0
+        noise_vec = [0.0] * dim
+        noise_vec[1] = 1.0  # orthogonal → cosine similarity 0.0
+
+        doc = Document(
+            id=uuid.uuid4(),
+            workspace_id=seed3.workspace_a.id,
+            name="threshold_test.txt",
+            mime_type="text/plain",
+            size_bytes=20,
+            status="ready",
+            uploaded_by=seed3.user_c.id,
+        )
+        db_session.add(doc)
+        await db_session.flush()
+
+        relevant_chunk = DocumentChunk(
+            document_id=doc.id,
+            chunk_index=0,
+            raw_text="highly relevant evidence passage",
+            contextual_text="highly relevant evidence passage",
+            embedding=relevant_vec,
+        )
+        noise_chunk = DocumentChunk(
+            document_id=doc.id,
+            chunk_index=1,
+            raw_text="completely unrelated background noise",
+            contextual_text="completely unrelated background noise",
+            embedding=noise_vec,
+        )
+        db_session.add_all([relevant_chunk, noise_chunk])
+        await db_session.commit()
+
+        try:
+            # Query aligned with relevant_vec → only the relevant chunk
+            hits = await _retrieve_chunks(db_session, seed3.workspace_a.id, relevant_vec)
+            assert len(hits) == 1
+            assert hits[0].chunk_id == relevant_chunk.id
+            assert hits[0].score >= 0.45
+
+            # Query orthogonal to both → empty (no hallucination fodder)
+            orthogonal = [0.0] * dim
+            orthogonal[2] = 1.0
+            empty = await _retrieve_chunks(db_session, seed3.workspace_a.id, orthogonal)
+            assert empty == []
+        finally:
+            await db_session.delete(noise_chunk)
+            await db_session.delete(relevant_chunk)
+            await db_session.delete(doc)
+            await db_session.commit()
+
+
+class TestAdaptiveFilter:
+    """Unit tests for Dynamic Top-K + score-gap filtering (no DB)."""
+
+    def _chunk(self, score: float, idx: int = 0):
+        from app.services.chat import RetrievedChunk
+
+        return RetrievedChunk(
+            chunk_id=uuid.uuid4(),
+            document_id=uuid.uuid4(),
+            document_name="doc.txt",
+            chunk_index=idx,
+            text=f"chunk {idx}",
+            score=score,
+        )
+
+    def test_keeps_close_mid_range_scores(self):
+        """Tightly clustered scores above the floor are all kept."""
+        from app.services.chat import _adaptive_filter
+
+        candidates = [self._chunk(0.55, 0), self._chunk(0.52, 1), self._chunk(0.50, 2)]
+        kept = _adaptive_filter(candidates)
+        assert [c.score for c in kept] == [0.55, 0.52, 0.50]
+
+    def test_stops_on_score_gap_dropoff(self):
+        """A >0.12 cliff vs the preceding chunk ends the candidate list."""
+        from app.services.chat import _adaptive_filter
+
+        candidates = [self._chunk(0.80, 0), self._chunk(0.75, 1), self._chunk(0.50, 2)]
+        kept = _adaptive_filter(candidates)
+        assert [c.score for c in kept] == [0.80, 0.75]
+
+    def test_rejects_best_hit_below_absolute_floor(self):
+        """If even the top hit is below 0.45, return nothing."""
+        from app.services.chat import _adaptive_filter
+
+        kept = _adaptive_filter([self._chunk(0.40, 0), self._chunk(0.20, 1)])
+        assert kept == []
+
+    def test_stops_when_later_chunk_falls_below_floor(self):
+        """Keep hits above the floor; stop once a later candidate dips under."""
+        from app.services.chat import _adaptive_filter
+
+        candidates = [self._chunk(0.55, 0), self._chunk(0.50, 1), self._chunk(0.40, 2)]
+        kept = _adaptive_filter(candidates)
+        assert [c.score for c in kept] == [0.55, 0.50]
 
 
 # ---------------------------------------------------------------------------

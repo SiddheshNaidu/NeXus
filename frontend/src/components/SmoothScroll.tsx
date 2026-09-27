@@ -15,6 +15,8 @@ export function SmoothScroll() {
       smoothWheel: true,
       wheelMultiplier: 1,
       touchMultiplier: 2,
+      // Let overflow-y containers (chat canvas, source rail, etc.) scroll natively
+      allowNestedScroll: true,
     });
 
     lenis.on("scroll", ScrollTrigger.update);

@@ -1,12 +1,13 @@
 """Document endpoints — Sprint 3 (upgraded from Sprint 2).
 
-POST /workspaces/{workspace_id}/documents  — upload a file (contributor+ only)
-GET  /documents/{document_id}/status       — poll processing state (viewer+)
-GET  /documents/{document_id}              — fetch document record (viewer+)
+POST   /workspaces/{workspace_id}/documents  — upload a file (contributor+ only)
+DELETE /documents/{document_id}              — delete document + cascade chunks (admin only)
+GET    /documents/{document_id}/status       — poll processing state (viewer+)
+GET    /documents/{document_id}              — fetch document record (viewer+)
 """
 import uuid
 
-from fastapi import APIRouter, Depends, UploadFile
+from fastapi import APIRouter, Depends, Response, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +26,7 @@ from app.schemas.documents import (
     DocumentUploadResponse,
     ProcessingJobRead,
 )
-from app.services.documents import create_document_from_upload
+from app.services.documents import create_document_from_upload, delete_document
 from app.services.permissions import Role, require_workspace_role
 from app.storage import StorageInterface
 
@@ -82,6 +83,33 @@ async def upload_document(
         document=DocumentRead.model_validate(doc),
         job_id=job.id,
     )
+
+
+@router.delete(
+    "/documents/{document_id}",
+    status_code=204,
+    summary="Delete document",
+    description=(
+        "Permanently deletes a document and all its chunks, pages, and "
+        "processing jobs. Cascades via DB foreign key. Requires Admin role."
+    ),
+)
+async def delete_document_endpoint(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    storage: StorageInterface = Depends(get_storage),
+) -> Response:
+    result = await db.execute(select(Document).where(Document.id == document_id))
+    doc = result.scalar_one_or_none()
+    if doc is None:
+        raise NotFoundError(f"Document {document_id} not found.")
+
+    # Only admins may delete documents
+    await require_workspace_role(db, current_user, doc.workspace_id, Role.ADMIN)
+
+    await delete_document(db, doc, storage)
+    return Response(status_code=204)
 
 
 @router.get(

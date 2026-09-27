@@ -1,0 +1,84 @@
+
+> nexus-app@0.1.0 dev
+> next dev
+
+▲ Next.js 16.3.6 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://10.31.159.3:3000
+✓ Ready in 644ms
+✓ Running next.config.ts took 46ms
+
+ GET /search 200 in 909ms (next.js: 282ms, application-code: 627ms)
+✓ Compiled in 826ms
+ GET /search 200 in 91ms (next.js: 16ms, application-code: 75ms)
+✓ Compiled in 152ms
+ GET /search 200 in 34ms (next.js: 9ms, application-code: 25ms)
+✓ Compiled in 757ms
+ GET /search 200 in 57ms (next.js: 9ms, application-code: 48ms)
+✓ Compiled in 83ms
+ GET /search 200 in 55ms (next.js: 10ms, application-code: 46ms)
+✓ Compiled in 80ms
+ GET /search 200 in 54ms (next.js: 12ms, application-code: 42ms)
+✓ Compiled in 71ms
+ GET /search 200 in 45ms (next.js: 12ms, application-code: 33ms)
+✓ Compiled in 436ms
+ GET /search 200 in 56ms (next.js: 11ms, application-code: 45ms)
+✓ Compiled in 58ms
+ GET /search 200 in 45ms (next.js: 8ms, application-code: 38ms)
+✓ Compiled in 69ms
+ GET /search 200 in 61ms (next.js: 14ms, application-code: 47ms)
+✓ Compiled in 74ms
+ GET /search 200 in 102ms (next.js: 12ms, application-code: 90ms)
+ GET / 200 in 69ms (next.js: 46ms, application-code: 23ms)
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+ GET / 200 in 309ms (next.js: 5ms, application-code: 303ms)
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+ GET /search 200 in 96ms (next.js: 6ms, application-code: 90ms)
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+ GET / 200 in 29ms (next.js: 6ms, application-code: 24ms)
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+ GET /upload 200 in 118ms (next.js: 60ms, application-code: 58ms)
+ GET / 200 in 20ms (next.js: 3ms, application-code: 18ms)
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+ GET / 200 in 61ms (next.js: 3ms, application-code: 58ms)
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+ GET /search 200 in 62ms (next.js: 11ms, application-code: 51ms)
+ GET /upload 200 in 22ms (next.js: 4ms, application-code: 18ms)
+ GET / 200 in 25ms (next.js: 4ms, application-code: 21ms)
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+ GET /search 200 in 52ms (next.js: 8ms, application-code: 44ms)
+ GET /upload 200 in 29ms (next.js: 5ms, application-code: 24ms)
+ GET /search 200 in 22ms (next.js: 4ms, application-code: 18ms)
+ GET /evidence/b5f3651f-484b-4837-a7c4-37a1ea482d9b?citation=19ceea59-41cc-40fc-8c30-934e0e4b06f9&text=KAUSHIK+NAIK%0ASoftware+Engineer%7CWeb+Developer%0Akaushiknaik96%40gmail.com+%7C+%2B91+9967052810+%7C+Dombivli%2C+Maharashtra%0ASUMMARY%0AAdaptable+engineering+student+with+hands-on+full-stack+experience+spanning+backend+service+design%2C+relational+and+BaaS%0Adata+layers%2C+and+applied+AI+tooling.+Comfortable+owning+a+project+end-to-end%2C+from+system+architecture+and+API+design+to%0Aenvironment+configuration+and+deployment%2C+with+a+consistent+emphasis+on+upfront+planning+and+documentation+before%0Awriting+code.%0APROJECTS&page= 200 in 945ms (next.js: 909ms, application-code: 36ms)
+[browser] In HTML, <div> cannot be a descendant of <p>.
+This will cause a hydration error.
+
+  ...
+    <SegmentViewNode type="page" pagePath="evidence/[...">
+      <SegmentTrieNode>
+      <ClientPageRoot Component={function EvidenceViewer} serverProvidedParams={{...}}>
+        <EvidenceViewer params={Promise} searchParams={Promise}>
+          <main className="min-h-[100...">
+            <Navbar>
+            <div className="flex-1 mt-...">
+              <Suspense fallback={<div>}>
+                <EvidenceContent documentId="b5f3651f-4...">
+                  <div className="flex-1 gri...">
+                    <div className="hidden lg:...">
+                      <div>
+                      <div className="flex-1 ove...">
+                        <div>
+                        <div>
+                          <span>
+                          <div className="relative b..." ref={{current:null}}>
+>                           <p className="text-sm text-zinc-400 leading-relaxed font-serif italic">
+>                             <div
+>                               className="absolute -right-6 top-1/2 -translate-y-1/2 w-6 h-[1px] bg-indigo-500 hidden..."
+>                             >
+                    ...
+    ...
+ 
+[browser] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+[?25h

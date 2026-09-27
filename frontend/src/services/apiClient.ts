@@ -13,20 +13,26 @@ const WORKSPACE_ID_KEY = "nexus_active_workspace_id";
 
 export function getDevUserId(): string | null {
   if (typeof window === "undefined") return null;
-  return sessionStorage.getItem(USER_ID_KEY);
+  return localStorage.getItem(USER_ID_KEY);
 }
 
 export function setDevUserId(id: string): void {
-  sessionStorage.setItem(USER_ID_KEY, id);
+  localStorage.setItem(USER_ID_KEY, id);
+}
+
+export function clearDevUserId(): void {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(USER_ID_KEY);
+  localStorage.removeItem(WORKSPACE_ID_KEY);
 }
 
 export function getActiveWorkspaceId(): string | null {
   if (typeof window === "undefined") return null;
-  return sessionStorage.getItem(WORKSPACE_ID_KEY);
+  return localStorage.getItem(WORKSPACE_ID_KEY);
 }
 
 export function setActiveWorkspaceId(id: string): void {
-  sessionStorage.setItem(WORKSPACE_ID_KEY, id);
+  localStorage.setItem(WORKSPACE_ID_KEY, id);
 }
 
 export class ApiError extends Error {

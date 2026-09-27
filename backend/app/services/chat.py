@@ -33,8 +33,22 @@ from app.db.models.conversations import Conversation, Message
 from app.db.models.evidence import Evidence
 from app.providers import EmbeddingProvider, LLMProvider
 
-# Number of chunks to retrieve per query
-_TOP_K = 5
+# Candidate pool size for vector retrieval (pre-adaptive filter).
+_TOP_K = 3
+
+# Absolute minimum cosine similarity (1 - distance).  Filters weak semantic
+# matches while still admitting moderately relevant hits in smaller corpora.
+_MIN_COSINE_SIMILARITY = 0.45
+
+# If a later candidate's score falls more than this below the preceding kept
+# chunk, stop taking further results (aggressive score-gap drop-off).
+_SCORE_GAP = 0.12
+
+# Rolling window: number of most-recent message pairs (user + assistant) to
+# include in the LLM context.  Prevents the accumulated token count from
+# growing without bound and crashing the model's context window.
+_HISTORY_WINDOW_PAIRS = 5
+_HISTORY_WINDOW = _HISTORY_WINDOW_PAIRS * 2  # messages (user + assistant each)
 
 # System prompt template — {context} is replaced with retrieved chunks
 _SYSTEM_PROMPT = """You are NEX, an AI research assistant inside the NEXUS Evidence Intelligence Workspace.
@@ -59,13 +73,43 @@ class RetrievedChunk(NamedTuple):
     score: float
 
 
+def _adaptive_filter(
+    chunks: list[RetrievedChunk],
+    *,
+    min_score: float = _MIN_COSINE_SIMILARITY,
+    score_gap: float = _SCORE_GAP,
+) -> list[RetrievedChunk]:
+    """Dynamic Top-K with score-gap fallback.
+
+    Candidates must already be ordered best→worst by cosine similarity.
+    Keeps a chunk when:
+      1. score >= min_score (absolute floor for sparse workspaces), and
+      2. the drop from the previously kept chunk is <= score_gap
+         (large cliff ⇒ remaining neighbors are a different topic).
+    Returns [] when even the best hit fails the floor.
+    """
+    kept: list[RetrievedChunk] = []
+    for chunk in chunks:
+        if chunk.score < min_score:
+            break
+        if kept and (kept[-1].score - chunk.score) > score_gap:
+            break
+        kept.append(chunk)
+    return kept
+
+
 async def _retrieve_chunks(
     db: AsyncSession,
     workspace_id: uuid.UUID,
     query_vector: list[float],
     top_k: int = _TOP_K,
 ) -> list[RetrievedChunk]:
-    """Run the cosine similarity search and return the top-k chunks."""
+    """Fetch a top-k candidate pool, then apply adaptive score-gap filtering.
+
+    SQL returns the nearest neighbors with no rigid distance cutoff.  Python
+    then applies the absolute floor + score-gap drop-off so sparse workspaces
+    still surface their best evidence while out-of-scope queries return [].
+    """
     sql = text("""
         SELECT
             dc.id            AS chunk_id,
@@ -87,7 +131,7 @@ async def _retrieve_chunks(
         sql,
         {"vec": vec_str, "workspace_id": workspace_id, "limit": top_k},
     )
-    return [
+    candidates = [
         RetrievedChunk(
             chunk_id=row.chunk_id,
             document_id=row.document_id,
@@ -98,6 +142,7 @@ async def _retrieve_chunks(
         )
         for row in result.fetchall()
     ]
+    return _adaptive_filter(candidates)
 
 
 def _build_context(chunks: list[RetrievedChunk]) -> str:
@@ -115,7 +160,12 @@ def _build_context(chunks: list[RetrievedChunk]) -> str:
 async def _build_history(
     db: AsyncSession, conversation_id: uuid.UUID
 ) -> list[dict]:
-    """Load existing messages for a conversation as a list of role/content dicts."""
+    """Load the last _HISTORY_WINDOW messages for a conversation.
+
+    Applies a rolling window so long conversations never exceed the LLM's
+    context limit.  Only the most recent _HISTORY_WINDOW_PAIRS pairs
+    (user + assistant) are included; older messages are silently dropped.
+    """
     from sqlalchemy import select
     from app.db.models.conversations import Message
 
@@ -124,9 +174,12 @@ async def _build_history(
         .where(Message.conversation_id == conversation_id)
         .order_by(Message.created_at.asc())
     )
+    all_messages = result.scalars().all()
+    # Apply rolling window — keep only the tail
+    windowed = all_messages[-_HISTORY_WINDOW:] if len(all_messages) > _HISTORY_WINDOW else all_messages
     return [
         {"role": msg.role, "content": msg.content}
-        for msg in result.scalars().all()
+        for msg in windowed
     ]
 
 
@@ -247,15 +300,17 @@ async def stream_message(
     ]
     yield f"data: {json.dumps({'type': 'evidence', 'chunks': evidence_payload})}\n\n"
 
-    # 4. Build conversation history + system prompt
+    # 4. Build conversation history + system prompt (rolling window)
     result = await db.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id)
         .order_by(Message.created_at.asc())
     )
+    all_msgs = result.scalars().all()
+    windowed = all_msgs[-_HISTORY_WINDOW:] if len(all_msgs) > _HISTORY_WINDOW else all_msgs
     history = [
         {"role": msg.role, "content": msg.content}
-        for msg in result.scalars().all()
+        for msg in windowed
     ]
     context = _build_context(chunks)
     messages = [

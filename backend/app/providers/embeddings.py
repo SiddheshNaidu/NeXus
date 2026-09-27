@@ -10,6 +10,7 @@ Usage:
     vectors = await provider.embed(["text one", "text two"])
 """
 import asyncio
+import logging
 
 from google import genai as _genai
 from google.genai import types as _types
@@ -17,12 +18,21 @@ from google.genai import types as _types
 from app.core.config import settings
 from app.providers import EmbeddingProvider
 
+logger = logging.getLogger(__name__)
+
 # Singleton client — created once at import time.
 # The google-genai client is thread-safe and reusable.
 _client = _genai.Client(api_key=settings.embedding_api_key)
 
 # Maximum texts Google allows in a single embed_content call.
 _BATCH_SIZE = 100
+
+# Retry configuration for individual embedding batches.
+# On rate-limit (429) or transient network errors, the batch is retried with
+# exponential back-off before being logged and skipped (DLQ behaviour).
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0   # seconds
+_RETRY_BACKOFF = 2.0      # multiplier per attempt
 
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
@@ -61,24 +71,56 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         # Flatten list of lists
         return [vec for batch in batch_results for vec in batch]
 
-    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Call the Gemini embedding API for a single batch asynchronously."""
+    async def _embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        """Call the Gemini embedding API for a single batch asynchronously.
+
+        Retries up to _MAX_RETRIES times with exponential back-off on any
+        exception (rate-limit, network timeout, etc.).  If all retries are
+        exhausted the batch is logged and a list of *None* placeholders is
+        returned — this is the Dead Letter Queue behaviour: successfully
+        embedded batches are never discarded because one batch failed.
+        """
         loop = asyncio.get_event_loop()
+        delay = _RETRY_BASE_DELAY
 
-        def _call() -> list[list[float]]:
-            response = _client.models.embed_content(
-                model=self._model,
-                contents=texts,
-                config=_types.EmbedContentConfig(
-                    output_dimensionality=self._dimension,
-                    task_type="RETRIEVAL_DOCUMENT",
-                ),
-            )
-            return [emb.values for emb in response.embeddings]
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                def _call() -> list[list[float]]:
+                    response = _client.models.embed_content(
+                        model=self._model,
+                        contents=texts,
+                        config=_types.EmbedContentConfig(
+                            output_dimensionality=self._dimension,
+                            task_type="RETRIEVAL_DOCUMENT",
+                        ),
+                    )
+                    return [emb.values for emb in response.embeddings]
 
-        # run_in_executor keeps the async event loop unblocked while the
-        # synchronous SDK call is in flight.
-        return await loop.run_in_executor(None, _call)
+                # run_in_executor keeps the async event loop unblocked while
+                # the synchronous SDK call is in flight.
+                return await loop.run_in_executor(None, _call)
+
+            except Exception as exc:
+                if attempt == _MAX_RETRIES:
+                    logger.error(
+                        "Embedding batch failed after %d attempts (%d texts): %s",
+                        _MAX_RETRIES,
+                        len(texts),
+                        exc,
+                    )
+                    # Return None placeholders so the caller can skip these
+                    # chunks while keeping all successfully embedded batches.
+                    return [None] * len(texts)  # type: ignore[return-value]
+
+                logger.warning(
+                    "Embedding batch attempt %d/%d failed: %s — retrying in %.1fs",
+                    attempt,
+                    _MAX_RETRIES,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                delay *= _RETRY_BACKOFF
 
 
 async def embed_query(text: str) -> list[float]:

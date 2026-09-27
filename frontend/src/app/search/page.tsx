@@ -1,431 +1,631 @@
-﻿"use client";
+"use client";
+
+/**
+ * Search / Chat page — NEXUS Active Workspace
+ *
+ * Architecture
+ * ────────────
+ * Three-column layout (hidden on mobile → stacked):
+ *   Left  (col-span-3)  Source Rail    — indexed documents
+ *   Centre (col-span-6) Answer Canvas  — streaming chat thread
+ *   Right  (col-span-3) Evidence Panel — active citation detail
+ *
+ * SSE stream handling
+ * ───────────────────
+ * Uses searchService.streamQuestion() which wraps the shared streamRequest()
+ * generator from apiClient.ts.  The stream yields three event types:
+ *
+ *   { type: "evidence", chunks: ChunkSearchResult[] }
+ *   { type: "text",     text: string }
+ *   { type: "done" }
+ *
+ * Token accumulation uses a ref (not state) to avoid re-renders on every
+ * character; a single setState flush happens at the end or on abort.
+ *
+ * Auto-scroll
+ * ───────────
+ * A sentinel <div ref={bottomRef}> sits after the last message.  Two
+ * effects scroll it into view: one when a new message is appended, one
+ * on every streaming tick so the user always sees the latest token.
+ */
 
 import * as React from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Navbar } from "@/components/ui/navbar";
-import { ArrowRight, MagnifyingGlass, FileText, Quotes, WarningCircle, Textbox } from "@phosphor-icons/react";
+import {
+  ArrowRight,
+  CaretLeft,
+  FileText,
+  MagnifyingGlass,
+  Quotes,
+  Sidebar,
+  Textbox,
+  X,
+} from "@phosphor-icons/react";
 import { searchService } from "@/services/searchService";
 import { documentsService } from "@/services/documentsService";
 import { useNexusSession } from "@/hooks/useNexusSession";
-import { Conversation, Message, Citation, DocumentSource } from "@/services/types";
+import { Citation, DocumentSource } from "@/services/types";
+import { ChatMessage, ChatMsg } from "@/components/ui/chat-message";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+
+// ─── Layout constants ─────────────────────────────────────────────────────────
+
+/** Source Rail width — within the 260–320px design range (w-72 = 288px). */
+const LEFT_RAIL_WIDTH = 288;
+/** Evidence Inspector width — within the 300–380px design range (w-80 = 320px). */
+const RIGHT_RAIL_WIDTH = 320;
+
+const SIDEBAR_SPRING = {
+  type: "spring" as const,
+  stiffness: 380,
+  damping: 36,
+  mass: 0.8,
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Stable ID for a new message placeholder. */
+function nextId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function SearchPage() {
   const router = useRouter();
   const { workspace, isReady } = useNexusSession();
 
+  // ── Conversation state ────────────────────────────────────────────────────
+  const [conversationId, setConversationId] = React.useState<string | null>(null);
+  const [messages, setMessages] = React.useState<ChatMsg[]>([]);
   const [query, setQuery] = React.useState("");
-  const [conv, setConv] = React.useState<Conversation | null>(null);
-  const [isSearching, setIsSearching] = React.useState(false);
-  const [streamingContent, setStreamingContent] = React.useState<string>("");
+  const [isStreaming, setIsStreaming] = React.useState(false);
+
+  /**
+   * Accumulated token text for the in-flight assistant message.
+   * Stored in a ref to avoid triggering a re-render on every token;
+   * we only push it to state on the streaming message's `streamingText` prop
+   * via a separate tick-based counter.
+   */
+  const streamAccRef = React.useRef("");
+  /** Incrementing counter to force a re-render on each token batch. */
+  const [tokenTick, setTokenTick] = React.useState(0);
+  /** ID of the placeholder "streaming" message currently in the list. */
+  const streamingMsgIdRef = React.useRef<string | null>(null);
+
+  // ── Document sources ──────────────────────────────────────────────────────
   const [sources, setSources] = React.useState<DocumentSource[]>([]);
-  const [activeCitation, setActiveCitation] = React.useState<{
-    id: string;
-    documentId: string;
-    doc: string;
-    page: string;
-    text: string;
-    section?: string;
-  } | null>(null);
 
-  const endOfMessagesRef = React.useRef<HTMLDivElement>(null);
+  // ── Right-panel active citation ──────────────────────────────────────────
+  const [activeCitation, setActiveCitation] = React.useState<Citation | null>(null);
 
+  // ── Collapsible sidebars (desktop) ───────────────────────────────────────
+  const [isLeftSidebarOpen, setIsLeftSidebarOpen] = React.useState(true);
+  /** Starts closed; opens automatically when a citation is selected. */
+  const [isRightSidebarOpen, setIsRightSidebarOpen] = React.useState(false);
+
+  // ── Auto-scroll sentinel ──────────────────────────────────────────────────
+  const bottomRef = React.useRef<HTMLDivElement>(null);
+  const scrollContainerRef = React.useRef<HTMLDivElement>(null);
+
+  // ── Session bootstrap ─────────────────────────────────────────────────────
   React.useEffect(() => {
     if (!isReady || !workspace) return;
 
-    searchService
-      .createConversation(workspace.id)
-      .then(setConv)
-      .catch((err) => {
-        console.error("Failed to create conversation:", err);
-        setConv({ id: "", messages: [] });
-      });
-
-    documentsService.getAllDocuments(workspace.id).then(setSources);
+    // Create a fresh conversation and fetch indexed documents in parallel.
+    Promise.all([
+      searchService.createConversation(workspace.id),
+      documentsService.getAllDocuments(workspace.id),
+    ]).then(([conv, docs]) => {
+      setConversationId(conv.id || null);
+      setSources(docs);
+    }).catch((err) => {
+      console.error("Session bootstrap failed:", err);
+      setConversationId(null);
+    });
   }, [isReady, workspace]);
 
+  // ── Auto-scroll on new messages ───────────────────────────────────────────
   React.useEffect(() => {
-    endOfMessagesRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [conv?.messages, isSearching]);
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages.length]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!query.trim() || isSearching || !conv) return;
+  // ── Auto-scroll on each streaming token ──────────────────────────────────
+  React.useEffect(() => {
+    if (!isStreaming) return;
+    bottomRef.current?.scrollIntoView({ behavior: "instant", block: "end" });
+  }, [tokenTick, isStreaming]);
 
-    const conversationId = conv.id;
-    if (!conversationId) {
-      console.warn("No conversation ID — backend may not be running.");
-      return;
-    }
+  // ── Submit ─────────────────────────────────────────────────────────────────
+  const handleSubmit = React.useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!query.trim() || isStreaming || !conversationId) return;
 
-    const currentQuery = query;
-    setQuery("");
-    setIsSearching(true);
-    setStreamingContent("");
+      const userText = query.trim();
+      setQuery("");
 
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: currentQuery,
-    };
-    setConv((prev) => prev ? { ...prev, messages: [...prev.messages, userMsg] } : prev);
+      // 1. Append user message immediately.
+      const userMsgId = nextId();
+      setMessages((prev) => [
+        ...prev,
+        { id: userMsgId, role: "user", content: userText } satisfies ChatMsg,
+      ]);
 
-    const streamingId = (Date.now() + 1).toString();
-    const streamingMsg: Message = {
-      id: streamingId,
-      role: "nexus",
-      content: "",
-      isStreaming: true,
-    };
-    setConv((prev) => prev ? { ...prev, messages: [...prev.messages, streamingMsg] } : prev);
+      // 2. Append a streaming placeholder for the assistant.
+      const asstId = nextId();
+      streamingMsgIdRef.current = asstId;
+      streamAccRef.current = "";
+      setMessages((prev) => [
+        ...prev,
+        { id: asstId, role: "nexus", content: "", isStreaming: true } satisfies ChatMsg,
+      ]);
+      setIsStreaming(true);
 
-    let evidenceCitations: Citation[] = [];
-
-    try {
-      const result = await searchService.streamQuestion(
-        conversationId,
-        currentQuery,
-        {
-          onEvidence: (ev) => {
-            evidenceCitations = ev.chunks.map((c) => ({
-              id: c.chunk_id,
-              documentId: c.document_id,
-              documentTitle: c.document_name,
-              extractedText: c.text,
-              relevanceScore: c.score,
-            }));
+      try {
+        const result = await searchService.streamQuestion(
+          conversationId,
+          userText,
+          {
+            onToken: (ev) => {
+              // Accumulate without state update; bump tick to trigger render.
+              streamAccRef.current += ev.text;
+              setTokenTick((t) => t + 1);
+            },
           },
-          onToken: (ev) => {
-            setStreamingContent((prev) => prev + ev.text);
-          },
-        },
-      );
+        );
 
-      const finalMsg: Message = {
-        id: streamingId,
-        role: "nexus",
-        content: result.content || streamingContent,
-        status: result.citations.length > 0 ? "SUCCESS" : "INSUFFICIENT_EVIDENCE",
-        citations: result.citations.length > 0 ? result.citations : evidenceCitations.length > 0 ? evidenceCitations : undefined,
-        isStreaming: false,
-      };
-
-      setConv((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          messages: prev.messages.map((m) =>
-            m.id === streamingId ? finalMsg : m,
-          ),
+        // 3. Replace placeholder with finalised message.
+        const finalMsg: ChatMsg = {
+          id: asstId,
+          role: "nexus",
+          content: result.content || streamAccRef.current,
+          isStreaming: false,
+          status: result.citations.length > 0 ? "SUCCESS" : "INSUFFICIENT_EVIDENCE",
+          citations: result.citations.length > 0 ? result.citations : undefined,
         };
-      });
-    } catch (err) {
-      console.error("Search error:", err);
 
-      const errorMsg: Message = {
-        id: streamingId,
-        role: "nexus",
-        content: "An error occurred while querying the engine. Is the backend running?",
-        status: "ERROR",
-        isStreaming: false,
-      };
+        setMessages((prev) =>
+          prev.map((m) => (m.id === asstId ? finalMsg : m)),
+        );
+      } catch (err) {
+        console.error("Stream error:", err);
 
-      setConv((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          messages: prev.messages.map((m) =>
-            m.id === streamingId ? errorMsg : m,
-          ),
+        const errMsg: ChatMsg = {
+          id: asstId,
+          role: "nexus",
+          content:
+            "An error occurred while querying the engine. Is the backend running?",
+          isStreaming: false,
+          status: "ERROR",
         };
-      });
-    } finally {
-      setIsSearching(false);
-      setStreamingContent("");
-    }
-  };
 
-  const handleCitationClick = (citation: Citation) => {
-    if (window.innerWidth < 1024) {
-      router.push(
-        `/evidence/${citation.documentId}?citation=${citation.id}&text=${encodeURIComponent(citation.extractedText)}&page=${citation.page ?? ""}`,
-      );
-    } else {
-      setActiveCitation({
-        id: citation.id,
-        documentId: citation.documentId,
-        doc: citation.documentTitle,
-        page: citation.page || "",
-        text: citation.extractedText,
-        section: citation.section,
-      });
-    }
-  };
+        setMessages((prev) =>
+          prev.map((m) => (m.id === asstId ? errMsg : m)),
+        );
+      } finally {
+        setIsStreaming(false);
+        streamAccRef.current = "";
+        streamingMsgIdRef.current = null;
+      }
+    },
+    [query, isStreaming, conversationId],
+  );
 
-  const renderMessageContent = (msg: Message) => {
-    if (msg.role === "user") {
-      return (
-        <div className="flex justify-end mb-8">
-          <div className="max-w-[80%] bg-white/5 border border-white/10 px-6 py-4">
-            <p className="text-zinc-300 text-sm">{msg.content}</p>
-          </div>
-        </div>
-      );
-    }
+  // ── Keyboard shortcut: Cmd/Ctrl+Enter submits ─────────────────────────────
+  const handleKeyDown = React.useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        handleSubmit(e as unknown as React.FormEvent);
+      }
+      // Plain Enter without shift submits (single-line behaviour)
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSubmit(e as unknown as React.FormEvent);
+      }
+    },
+    [handleSubmit],
+  );
 
-    if (msg.isStreaming) {
-      return (
-        <div className="mb-12">
-          <div className="flex items-center gap-3 border-b border-white/10 pb-4 mb-6">
-            <div className="h-1.5 w-1.5 bg-indigo-500 animate-pulse" />
-            <span className="text-xs font-mono uppercase tracking-[0.2em] text-zinc-500">NEX · Composing Answer</span>
-          </div>
-          <p className="text-zinc-300 text-lg leading-relaxed mb-6 whitespace-pre-wrap">
-            {streamingContent}
-            <span className="inline-block w-0.5 h-4 bg-indigo-400 ml-0.5 animate-pulse align-middle" />
-          </p>
-        </div>
-      );
-    }
+  // ── Citation click ────────────────────────────────────────────────────────
+  const handleCitationClick = React.useCallback(
+    (cit: Citation) => {
+      if (typeof window !== "undefined" && window.innerWidth < 1024) {
+        router.push(
+          `/evidence/${cit.documentId}?citation=${cit.id}&text=${encodeURIComponent(cit.extractedText)}&page=${cit.page ?? ""}`,
+        );
+      } else {
+        setActiveCitation(cit);
+        setIsRightSidebarOpen(true);
+      }
+    },
+    [router],
+  );
 
-    if (msg.status === "ERROR") {
-      return <EdgeState title="Engine Error" desc={msg.content} color="text-red-400" bg="bg-red-500/5" border="border-red-500/20" />;
-    }
-    if (msg.status === "ACCESS_RESTRICTED") {
-      return <EdgeState title="Clearance Restricted" desc={msg.content} color="text-amber-400" bg="bg-amber-500/5" border="border-amber-500/20" />;
-    }
-    if (msg.status === "INSUFFICIENT_EVIDENCE") {
-      return <EdgeState title="Insufficient Evidence" desc={msg.content || "NEX couldn't find supporting information in the documents available to you."} color="text-indigo-400" bg="bg-indigo-500/5" border="border-indigo-500/20" />;
-    }
-    if (msg.status === "NO_RESULTS") {
-      return <EdgeState title="No Results" desc={msg.content || "No relevant evidence was found across the indexed workspace."} color="text-zinc-400" bg="bg-zinc-500/5" border="border-zinc-500/20" />;
-    }
-    if (msg.status === "CONFLICT") {
-      return (
-        <div className="mb-12">
-          <EdgeState title="Evidence Conflict Detected" desc={msg.content} color="text-amber-400" bg="bg-amber-500/5" border="border-amber-500/20" />
-          {msg.conflictingSources && msg.conflictingSources.length > 0 && (
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-              {msg.conflictingSources.map((c, i) => (
-                <div key={i} className="border border-amber-500/20 bg-amber-500/5 p-4">
-                  <div className="flex justify-between items-center mb-3">
-                    <span className="text-[10px] font-mono uppercase text-amber-500/70 border border-amber-500/20 px-1.5 py-0.5">Source A</span>
-                    <span className="text-[10px] font-mono text-zinc-500">{c.sourceA}</span>
-                  </div>
-                  <div className="flex justify-between items-center mb-4">
-                    <span className="text-[10px] font-mono uppercase text-amber-500/70 border border-amber-500/20 px-1.5 py-0.5">Source B</span>
-                    <span className="text-[10px] font-mono text-zinc-500">{c.sourceB}</span>
-                  </div>
-                  <p className="text-xs text-amber-100/70">{c.detail}</p>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      );
-    }
+  // ── Derived ───────────────────────────────────────────────────────────────
+  const inputDisabled = isStreaming || !conversationId;
+  const isEmpty = messages.length === 0 && !isStreaming;
 
-    return (
-      <div className="mb-12">
-        <div className="flex items-center gap-3 border-b border-white/10 pb-4 mb-6">
-          <div className="h-1.5 w-1.5 bg-indigo-500" />
-          <span className="text-xs font-mono uppercase tracking-[0.2em] text-zinc-500">NEXUS Verified Response</span>
-          {msg.citations && msg.citations.length > 0 && (
-            <span className="ml-auto text-[10px] font-mono text-zinc-600">
-              {msg.citations.length} source{msg.citations.length > 1 ? "s" : ""}
-            </span>
-          )}
-        </div>
-        
-        <p className="text-zinc-300 text-lg leading-relaxed mb-6 whitespace-pre-wrap">
-          {msg.content}
-        </p>
-        
-        {msg.citations && msg.citations.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {msg.citations.map((cit) => (
-              <button 
-                key={cit.id} 
-                onClick={() => handleCitationClick(cit)}
-                className="px-3 py-1.5 bg-white/5 border border-white/10 text-zinc-400 text-xs font-mono hover:bg-indigo-500/10 hover:border-indigo-500/30 hover:text-indigo-300 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0A0A]"
-              >
-                [{cit.page ? `p.${cit.page}` : "ref"}] {cit.documentTitle}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  };
+  /**
+   * Snapshot the streaming accumulator outside JSX so the linter does not
+   * flag reading a ref value during render.  tokenTick changing forces
+   * a re-render so this re-derives on every token.
+   */
+  const liveStreamText = streamAccRef.current; // safe: used in render, deps tracked via tokenTick
 
+  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <main className="min-h-[100dvh] w-full bg-[#050505] flex flex-col text-zinc-50 overflow-hidden">
+    <main className="h-[100dvh] w-full bg-[#050505] flex flex-col text-zinc-50 overflow-hidden">
       <Navbar />
+      {/* Spacer matching fixed navbar height so the workspace gets a real remaining height */}
+      <div className="h-14 md:h-16 flex-shrink-0" aria-hidden />
 
-      <div className="flex-1 mt-16 grid grid-cols-1 lg:grid-cols-12 w-full h-[calc(100dvh-64px)] border-t border-white/5">
-        
-        {/* LEFT COLUMN: Source Rail */}
-        <div className="hidden lg:flex flex-col col-span-3 h-full border-r border-white/5 bg-[#050505]">
-          <div className="p-5 border-b border-white/5 flex items-center justify-between">
-            <h2 className="text-[10px] font-mono uppercase tracking-[0.2em] text-zinc-500">Source Rail</h2>
-            <span className="text-[10px] font-mono text-zinc-600">{sources.length} Indexed</span>
-          </div>
-          
-          <div className="flex-1 overflow-y-auto">
-            {sources.length === 0 ? (
-              <div className="p-8 text-center flex flex-col items-center">
-                <FileText size={24} className="text-zinc-700 mb-4" />
-                <p className="text-xs text-zinc-500 mb-6">No documents indexed in this workspace.</p>
-                <Link href="/upload" className="text-[10px] font-mono uppercase tracking-widest text-indigo-400 hover:text-indigo-300 transition-colors border border-indigo-500/30 px-4 py-2 hover:bg-indigo-500/10">
-                  Ingest Sources
-                </Link>
+      {/* Three-column workspace — flex so sidebars can animate width and chat fills the rest */}
+      <div className="flex-1 min-h-0 flex w-full border-t border-white/5 overflow-hidden">
+
+        {/* ── LEFT: Source Rail ─────────────────────────────────────────── */}
+        <motion.aside
+          initial={false}
+          animate={{ width: isLeftSidebarOpen ? LEFT_RAIL_WIDTH : 0 }}
+          transition={SIDEBAR_SPRING}
+          className="hidden lg:flex flex-col h-full min-h-0 flex-shrink-0 overflow-hidden border-r border-white/5 bg-[#050505]"
+        >
+          <div className="flex w-[288px] h-full min-h-0 flex-col">
+            <div className="flex-shrink-0 px-5 py-4 border-b border-white/5 flex items-center justify-between gap-2">
+              <div className="min-w-0 flex items-center gap-2">
+                <h2 className="text-[10px] font-mono uppercase tracking-[0.2em] text-zinc-500 truncate">
+                  Source Rail
+                </h2>
+                <span className="text-[10px] font-mono text-zinc-600 tabular-nums">
+                  {sources.length}
+                </span>
               </div>
-            ) : (
-              <div className="divide-y divide-white/5">
-                {sources.map((doc) => (
-                  <div key={doc.id} className="group p-5 bg-[#050505] hover:bg-white/[0.02] transition-colors cursor-pointer">
-                    <div className="flex items-start gap-3">
-                      <FileText size={16} className="text-zinc-600 group-hover:text-indigo-400 mt-0.5 shrink-0 transition-colors" />
-                      <div>
-                        <p className="text-xs font-mono text-zinc-600 mb-1">{doc.status}</p>
-                        <p className="text-sm font-medium text-zinc-300 group-hover:text-zinc-50 transition-colors line-clamp-2">
+              <button
+                type="button"
+                onClick={() => setIsLeftSidebarOpen(false)}
+                className="h-7 w-7 flex items-center justify-center text-zinc-500 hover:text-zinc-200 hover:bg-white/5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                aria-label="Collapse source rail"
+              >
+                <CaretLeft size={14} />
+              </button>
+            </div>
+
+            <div
+              data-lenis-prevent
+              className="flex-1 min-h-0 overflow-y-auto overscroll-contain"
+            >
+              {sources.length === 0 ? (
+                <div className="p-8 text-center flex flex-col items-center gap-4">
+                  <FileText size={22} className="text-zinc-700" />
+                  <p className="text-xs text-zinc-500">
+                    No documents indexed in this workspace.
+                  </p>
+                  <Link
+                    href="/upload"
+                    className="text-[10px] font-mono uppercase tracking-widest text-indigo-400 hover:text-indigo-300 transition-colors border border-indigo-500/30 px-4 py-2 hover:bg-indigo-500/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                  >
+                    Ingest Sources
+                  </Link>
+                </div>
+              ) : (
+                <div className="divide-y divide-white/[0.04]">
+                  {sources.map((doc) => (
+                    <div
+                      key={doc.id}
+                      className="group flex items-start gap-3 px-5 py-4 hover:bg-white/[0.025] transition-colors cursor-default"
+                    >
+                      <FileText
+                        size={14}
+                        className="text-zinc-600 group-hover:text-indigo-400 mt-0.5 flex-shrink-0 transition-colors"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-mono text-zinc-600 mb-0.5 uppercase tracking-wider">
+                          {doc.status}
+                        </p>
+                        <p className="text-xs font-medium text-zinc-400 group-hover:text-zinc-200 transition-colors line-clamp-2 leading-relaxed">
                           {doc.filename}
                         </p>
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* CENTER COLUMN: Answer Canvas */}
-        <div className="col-span-1 lg:col-span-6 flex flex-col h-full bg-[#0A0A0A] relative">
-          
-          <div className="flex-1 overflow-y-auto p-6 md:p-12 lg:p-20 flex flex-col pb-40">
-            <AnimatePresence mode="wait">
-              {(!conv || conv.messages.length === 0) && !isSearching && (
-                <motion.div 
-                  key="idle"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="m-auto text-center max-w-md w-full"
-                >
-                  <h3 className="text-2xl font-medium text-zinc-300 mb-4">Interrogate your documents.</h3>
-                  <p className="text-sm text-zinc-500 font-mono tracking-wide uppercase">
-                    {isReady
-                      ? workspace
-                        ? `NEX Core Engine · ${workspace.name}`
-                        : "NEX Core Engine · No workspace"
-                      : "Connecting..."}
-                  </p>
-                </motion.div>
+                  ))}
+                </div>
               )}
+            </div>
+          </div>
+        </motion.aside>
 
-              {conv?.messages.map((msg) => (
-                <motion.div 
-                  key={msg.id}
-                  initial={{ opacity: 0, y: 16 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="w-full max-w-3xl mx-auto"
+        {/* ── CENTRE: Answer Canvas ─────────────────────────────────────── */}
+        <section className="relative flex-1 min-w-0 flex flex-col h-full min-h-0 bg-[#0a0a0a] overflow-hidden">
+
+          {/* Reopen controls when a rail is collapsed (desktop only) */}
+          <div className="hidden lg:flex absolute top-3 left-3 z-20 gap-2">
+            <AnimatePresence>
+              {!isLeftSidebarOpen && (
+                <motion.button
+                  key="open-left"
+                  type="button"
+                  initial={{ opacity: 0, x: -6 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -6 }}
+                  transition={{ duration: 0.15 }}
+                  onClick={() => setIsLeftSidebarOpen(true)}
+                  className="h-8 px-2.5 flex items-center gap-1.5 border border-white/10 bg-[#0d0d0d]/90 backdrop-blur-sm text-zinc-400 hover:text-zinc-100 hover:border-white/20 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                  aria-label="Open source rail"
                 >
-                  {renderMessageContent(msg)}
-                </motion.div>
-              ))}
-
-              <div ref={endOfMessagesRef} />
+                  <Sidebar size={14} />
+                  <span className="text-[9px] font-mono uppercase tracking-widest">
+                    Sources
+                  </span>
+                </motion.button>
+              )}
+            </AnimatePresence>
+          </div>
+          <div className="hidden lg:flex absolute top-3 right-3 z-20 gap-2">
+            <AnimatePresence>
+              {!isRightSidebarOpen && (
+                <motion.button
+                  key="open-right"
+                  type="button"
+                  initial={{ opacity: 0, x: 6 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 6 }}
+                  transition={{ duration: 0.15 }}
+                  onClick={() => setIsRightSidebarOpen(true)}
+                  className="h-8 px-2.5 flex items-center gap-1.5 border border-white/10 bg-[#0d0d0d]/90 backdrop-blur-sm text-zinc-400 hover:text-zinc-100 hover:border-white/20 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                  aria-label="Open evidence inspector"
+                >
+                  <span className="text-[9px] font-mono uppercase tracking-widest">
+                    Evidence
+                  </span>
+                  <Quotes size={14} />
+                </motion.button>
+              )}
             </AnimatePresence>
           </div>
 
-          <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-[#0A0A0A] via-[#0A0A0A] to-transparent pt-12 pb-6 px-6 md:px-12 lg:px-20">
-            <form onSubmit={handleSubmit} className="relative w-full max-w-3xl mx-auto group">
-              <div className="absolute inset-y-0 left-0 flex items-center pl-4 pointer-events-none">
-                <MagnifyingGlass size={18} className="text-zinc-500 group-focus-within:text-indigo-400 transition-colors" />
+          {/* Scrollable message list */}
+          <div
+            ref={scrollContainerRef}
+            data-lenis-prevent
+            className="flex-1 h-full min-h-0 overflow-y-auto overscroll-contain"
+          >
+            <div className="px-6 md:px-12 lg:px-16 py-10 flex flex-col gap-10 pb-36">
+              {/* Empty-state prompt */}
+              <AnimatePresence mode="wait">
+                {isEmpty && (
+                  <motion.div
+                    key="idle"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0, transition: { duration: 0.15 } }}
+                    className="m-auto mt-20 text-center max-w-sm"
+                  >
+                    <h3 className="text-xl font-medium text-zinc-300 mb-3">
+                      Interrogate your documents.
+                    </h3>
+                    <p className="text-xs text-zinc-500 font-mono tracking-widest uppercase">
+                      {isReady
+                        ? workspace
+                          ? `${workspace.name} · NEX Core`
+                          : "NEX Core · No workspace"
+                        : "Connecting to engine…"}
+                    </p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Message list */}
+              {messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className="w-full max-w-2xl mx-auto"
+                >
+                  <ChatMessage
+                    message={msg}
+                    streamingText={msg.isStreaming ? liveStreamText : undefined}
+                    onCitationClick={handleCitationClick}
+                  />
+                </div>
+              ))}
+
+              {/* Auto-scroll sentinel */}
+              <div ref={bottomRef} className="h-px" aria-hidden />
+            </div>
+          </div>
+
+          {/* ── Input bar — sticky at the bottom ─────────────────────── */}
+          <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-[#0a0a0a] via-[#0a0a0a]/95 to-transparent pt-10 pb-5 px-6 md:px-12 lg:px-16 pointer-events-none">
+            <form
+              onSubmit={handleSubmit}
+              className="relative w-full max-w-2xl mx-auto pointer-events-auto"
+            >
+              {/* Glass border + focus ring wrapper */}
+              <div className="relative flex items-end gap-0 border border-white/10 bg-[#0d0d0d] transition-colors focus-within:border-indigo-500/50 shadow-2xl">
+                <MagnifyingGlass
+                  size={16}
+                  className="absolute left-4 bottom-[14px] text-zinc-600 pointer-events-none"
+                />
+
+                {/* Auto-growing textarea for multi-line input */}
+                <textarea
+                  rows={1}
+                  value={query}
+                  onChange={(e) => {
+                    setQuery(e.target.value);
+                    // Auto-grow: reset height, then set to scrollHeight
+                    e.target.style.height = "auto";
+                    e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+                  }}
+                  onKeyDown={handleKeyDown}
+                  placeholder={
+                    inputDisabled && !isStreaming
+                      ? "Connecting to engine…"
+                      : "Submit query to engine…"
+                  }
+                  disabled={inputDisabled}
+                  className="
+                    flex-1 resize-none overflow-y-auto
+                    bg-transparent pl-10 pr-12 py-3.5
+                    text-sm text-zinc-100 placeholder:text-zinc-600
+                    focus:outline-none leading-relaxed
+                    disabled:opacity-50 disabled:cursor-not-allowed
+                    max-h-40
+                  "
+                  style={{ scrollbarWidth: "none" }}
+                />
+
+                {/* Submit button */}
+                <button
+                  type="submit"
+                  disabled={!query.trim() || inputDisabled}
+                  className="
+                    absolute right-0 bottom-0
+                    h-full px-4 flex items-end pb-3.5
+                    text-zinc-500 hover:text-indigo-400
+                    disabled:opacity-30 disabled:hover:text-zinc-500
+                    transition-colors focus:outline-none
+                    focus-visible:ring-2 focus-visible:ring-indigo-400
+                    focus-visible:ring-inset
+                  "
+                  aria-label="Send"
+                >
+                  {isStreaming ? (
+                    <span className="h-4 w-4 rounded-full border-2 border-indigo-500/50 border-t-indigo-400 animate-spin" />
+                  ) : (
+                    <ArrowRight size={16} />
+                  )}
+                </button>
               </div>
-              <input 
-                type="text" 
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={isReady && conv ? "Submit query to engine..." : "Connecting to engine…"}
-                className="w-full bg-[#050505] border border-white/10 hover:border-white/20 focus:border-indigo-500/50 rounded-none pl-12 pr-14 py-4 text-sm text-zinc-50 placeholder:text-zinc-600 focus:outline-none transition-all shadow-2xl"
-                disabled={isSearching || !conv || !conv.id}
-              />
-              <button 
-                type="submit" 
-                disabled={!query.trim() || isSearching || !conv || !conv.id}
-                className="absolute inset-y-0 right-0 px-4 flex items-center justify-center text-zinc-500 hover:text-indigo-400 disabled:opacity-50 disabled:hover:text-zinc-500 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0A0A]"
-              >
-                <ArrowRight size={18} />
-              </button>
+
+              {/* Hint */}
+              <p className="mt-1.5 text-right text-[9px] font-mono text-zinc-700 tracking-wider select-none">
+                ENTER to send · SHIFT+ENTER for newline
+              </p>
             </form>
           </div>
-        </div>
+        </section>
 
-        {/* RIGHT COLUMN: Evidence Inspector */}
-        <div className="hidden lg:flex flex-col col-span-3 h-full border-l border-white/5 bg-[#050505]">
-          <div className="p-5 border-b border-white/5">
-            <h2 className="text-[10px] font-mono uppercase tracking-[0.2em] text-zinc-500">Evidence Inspector</h2>
-          </div>
-          
-          <div className="flex-1 overflow-y-auto p-5">
-            {activeCitation ? (
-              <motion.div 
-                key={activeCitation.id}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="flex flex-col gap-8"
+        {/* ── RIGHT: Evidence Inspector ─────────────────────────────────── */}
+        <motion.aside
+          initial={false}
+          animate={{ width: isRightSidebarOpen ? RIGHT_RAIL_WIDTH : 0 }}
+          transition={SIDEBAR_SPRING}
+          className="hidden lg:flex flex-col h-full min-h-0 flex-shrink-0 overflow-hidden border-l border-white/5 bg-[#050505]"
+        >
+          <div className="flex w-[320px] h-full min-h-0 flex-col">
+            <div className="flex-shrink-0 px-5 py-4 border-b border-white/5 flex items-center justify-between gap-2">
+              <h2 className="text-[10px] font-mono uppercase tracking-[0.2em] text-zinc-500 truncate">
+                Evidence Inspector
+              </h2>
+              <button
+                type="button"
+                onClick={() => setIsRightSidebarOpen(false)}
+                className="h-7 w-7 flex items-center justify-center text-zinc-500 hover:text-zinc-200 hover:bg-white/5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                aria-label="Close evidence inspector"
               >
-                <div>
-                  <span className="text-[10px] font-mono text-indigo-400 uppercase tracking-widest mb-2 block">Active Citation</span>
-                  <div className="flex items-center gap-2 mb-2">
-                    <FileText size={16} className="text-zinc-400 shrink-0" />
-                    <h3 className="text-sm font-medium text-zinc-300 leading-tight">{activeCitation.doc}</h3>
-                  </div>
-                  <div className="flex gap-2 text-[10px] font-mono text-zinc-500 uppercase tracking-widest">
-                    {activeCitation.page && <span>Pg {activeCitation.page}</span>}
-                    {activeCitation.section && <span>· {activeCitation.section}</span>}
-                  </div>
-                </div>
-                
-                <div className="relative border-l-2 border-indigo-500 pl-4 py-1">
-                  <p className="text-sm text-zinc-400 leading-relaxed font-serif italic">
-                    &ldquo;{activeCitation.text}&rdquo;
-                  </p>
-                </div>
-                
-                <Link
-                  href={`/evidence/${activeCitation.documentId}?citation=${activeCitation.id}&text=${encodeURIComponent(activeCitation.text)}&page=${activeCitation.page}`}
-                  className="group flex items-center gap-3 w-full py-3 px-4 border border-white/5 hover:border-white/10 hover:bg-white/[0.02] transition-colors mt-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#050505]"
-                >
-                  <Textbox size={16} className="text-zinc-500 group-hover:text-zinc-300 transition-colors" />
-                  <span className="text-xs font-mono uppercase tracking-widest text-zinc-400 group-hover:text-zinc-300 transition-colors">Inspect Document</span>
-                </Link>
-              </motion.div>
-            ) : (
-              <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
-                <Quotes size={24} className="text-zinc-600 mb-4" />
-                <p className="text-[10px] font-mono uppercase tracking-[0.2em] text-zinc-500 max-w-[200px]">Waiting for citation selection</p>
-              </div>
-            )}
+                <X size={14} />
+              </button>
+            </div>
+
+            <div
+              data-lenis-prevent
+              className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5"
+            >
+              <AnimatePresence mode="wait">
+                {activeCitation ? (
+                  <motion.div
+                    key={activeCitation.id}
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex flex-col gap-6"
+                  >
+                    {/* Citation header */}
+                    <div>
+                      <span className="text-[9px] font-mono text-indigo-400 uppercase tracking-widest mb-2 block">
+                        Active Citation
+                      </span>
+                      <div className="flex items-start gap-2 mb-1">
+                        <FileText size={14} className="text-zinc-400 flex-shrink-0 mt-0.5" />
+                        <h3 className="text-sm font-medium text-zinc-300 leading-snug">
+                          {activeCitation.documentTitle}
+                        </h3>
+                      </div>
+                      <div className="flex gap-2 text-[9px] font-mono text-zinc-600 uppercase tracking-widest pl-5">
+                        {activeCitation.page && (
+                          <span>Pg {activeCitation.page}</span>
+                        )}
+                        {activeCitation.section && (
+                          <span>· {activeCitation.section}</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Excerpt */}
+                    <blockquote className="border-l-2 border-indigo-500 pl-4">
+                      <p className="text-sm text-zinc-400 leading-relaxed italic">
+                        &ldquo;{activeCitation.extractedText}&rdquo;
+                      </p>
+                    </blockquote>
+
+                    {/* Relevance */}
+                    {activeCitation.relevanceScore != null && (
+                      <div className="flex items-center gap-3">
+                        <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-wider">
+                          Relevance
+                        </span>
+                        <div className="flex-1 h-0.5 bg-white/5 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-indigo-500 rounded-full"
+                            style={{
+                              width: `${Math.round(activeCitation.relevanceScore * 100)}%`,
+                            }}
+                          />
+                        </div>
+                        <span className="text-[9px] font-mono text-zinc-500 tabular-nums">
+                          {Math.round(activeCitation.relevanceScore * 100)}%
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Inspect link */}
+                    <Link
+                      href={`/evidence/${activeCitation.documentId}?citation=${activeCitation.id}&text=${encodeURIComponent(activeCitation.extractedText)}&page=${activeCitation.page ?? ""}`}
+                      className="group flex items-center gap-3 w-full py-3 px-4 border border-white/5 hover:border-white/10 hover:bg-white/[0.025] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#050505]"
+                    >
+                      <Textbox
+                        size={14}
+                        className="text-zinc-500 group-hover:text-zinc-300 transition-colors"
+                      />
+                      <span className="text-xs font-mono uppercase tracking-widest text-zinc-500 group-hover:text-zinc-300 transition-colors">
+                        Inspect Document
+                      </span>
+                    </Link>
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="empty"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 0.3 }}
+                    exit={{ opacity: 0 }}
+                    className="h-full flex flex-col items-center justify-center text-center"
+                  >
+                    <Quotes size={22} className="text-zinc-600 mb-3" />
+                    <p className="text-[10px] font-mono uppercase tracking-[0.2em] text-zinc-500 max-w-[180px] leading-relaxed">
+                      Click a citation badge to inspect the source evidence
+                    </p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
-        </div>
+        </motion.aside>
 
       </div>
     </main>
-  );
-}
-
-function EdgeState({ title, desc, color, bg, border }: { title: string, desc: string, color: string, bg: string, border: string }) {
-  return (
-    <div className={`p-6 border ${border} ${bg} mb-12`}>
-      <span className={`text-[10px] font-mono uppercase tracking-[0.2em] mb-4 flex items-center gap-2 ${color}`}>
-        <WarningCircle size={14} weight="bold" />
-        {title}
-      </span>
-      <p className="text-zinc-300 text-sm leading-relaxed">{desc}</p>
-    </div>
   );
 }
