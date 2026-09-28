@@ -1,7 +1,7 @@
-﻿"use client";
+"use client";
 
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 
 const VOXEL_LETTERS = {
@@ -69,6 +69,12 @@ function VoxelLetter({ grid, offset, isLoaded, onFadeOut }: { grid: number[][]; 
 
 function PreloaderScene({ isLoaded, onComplete }: { isLoaded: boolean; onComplete: () => void }) {
   const [fadeOut, setFadeOut] = useState(false);
+  const { camera, size } = useThree();
+
+  useEffect(() => {
+    const aspect = size.width / size.height;
+    camera.position.z = Math.max(5, 8.5 / aspect);
+  }, [size, camera]);
 
   useEffect(() => {
     if (!isLoaded) return;

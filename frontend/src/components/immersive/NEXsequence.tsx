@@ -207,7 +207,7 @@ export function NEXsequence() {
 
       {/* MOBILE (<md): stacked column */}
       <div className="flex md:hidden flex-col w-full" style={{ minHeight: "100svh" }}>
-        <div className="w-full flex-shrink-0 pointer-events-auto" style={{ height: "60svh" }}>
+        <div className="w-full flex-shrink-0 pointer-events-none" style={{ height: "60svh" }}>
           <Canvas camera={{ position: [0, 0, 8], fov: 50 }} dpr={[1, 1]} performance={{ min: 0.5 }} gl={{ powerPreference: "low-power" }} style={{ width: "100%", height: "100%" }}>
             <Scene3D />
           </Canvas>
